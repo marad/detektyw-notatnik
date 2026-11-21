@@ -27,8 +27,9 @@
   .gresize { pointer-events: auto; position: absolute; width: 18px; height: 18px; }
   .gresize.nw { left: -6px; top: -6px; cursor: nwse-resize; } .gresize.se { right: -6px; bottom: -6px; cursor: nwse-resize; }
   .gresize.ne { right: -6px; top: -6px; cursor: nesw-resize; } .gresize.sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
-  .gresize.se::after { content: ''; position: absolute; right: 7px; bottom: 7px; width: 10px; height: 10px;
-                       border-right: 3px solid var(--c); border-bottom: 3px solid var(--c); border-radius: 0 0 4px 0; }
+  /* Resize grip: two diagonal strokes tucked inside the bottom-right corner. */
+  .gresize.se::after { content: ''; position: absolute; right: 11px; bottom: 11px; width: 13px; height: 13px; opacity: .75;
+                       background: linear-gradient(135deg, transparent 52%, var(--c) 52% 62%, transparent 62% 76%, var(--c) 76% 86%, transparent 86%); }
   .osoba { --c: #7aa2f7; } .sprawa { --c: #f7768e; } .miejsce { --c: #9ece6a; } .dowod { --c: #e0af68; }
 
   * { box-sizing: border-box; }
