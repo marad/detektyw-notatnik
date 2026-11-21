@@ -1,12 +1,13 @@
 // End-to-end check of index.html in headless Chrome, driven over the DevTools protocol.
 // Usage: node e2e-test.mjs        (needs `google-chrome` on PATH, Node 22+)
+//        PAGE_URL=https://... node e2e-test.mjs    to check a deployed copy
 import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const page = 'file://' + join(dirname(fileURLToPath(import.meta.url)), 'index.html');
+const page = process.env.PAGE_URL || 'file://' + join(dirname(fileURLToPath(import.meta.url)), 'index.html');
 const tmp = mkdtempSync(join(tmpdir(), 'detektyw-e2e-'));
 const KEY = 'detektyw-notatnik.v1';
 
