@@ -1,0 +1,700 @@
+<!doctype html>
+<!--
+  Investigation logbook for a cooperative detective board game: tracks days, hours, overtime and stress,
+  the team's location, shared token pools and once-per-day abilities. Single file, no build, no server.
+  Rules are settings, not constants; team members and their abilities are entered by the players.
+  State lives in this browser's localStorage.
+-->
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dziennik śledztwa</title>
+<style>
+  /* Tokyo Night palette, shared with the evidence board */
+  :root { --bg: #1a1b26; --bg-dark: #16161e; --bg-card: #24283b; --bg-hl: #292e42; --line: #414868;
+          --fg: #c0caf5; --fg-dim: #a9b1d6; --muted: #565f89; --sel: #33467c;
+          --blue: #7aa2f7; --red: #f7768e; --green: #9ece6a; --yellow: #e0af68; --purple: #bb9af7; --cyan: #7dcfff; --orange: #ff9e64;
+          color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; font: 16px/1.4 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  body { background-image: radial-gradient(#2a2f45 1px, transparent 1px); background-size: 24px 24px; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  [hidden] { display: none !important; }
+  svg.ic { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+
+  .btn { border: 1px solid var(--line); background: var(--bg-dark); border-radius: 8px; padding: 6px 14px; text-decoration: none; color: var(--fg);
+         display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+  .btn:hover:not(:disabled) { background: var(--bg-hl); border-color: var(--muted); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn.primary { background: var(--blue); border-color: var(--blue); color: var(--bg); font-weight: 700; }
+  .btn.primary:hover:not(:disabled) { background: #9bb8fa; }
+  .btn.danger { color: var(--red); }
+  .btn.small { padding: 2px 9px; font-size: 14px; border-radius: 6px; }
+  .round { width: 34px; height: 34px; padding: 0; justify-content: center; border-radius: 50%; font-size: 20px; line-height: 1; }
+
+  header { display: flex; align-items: center; gap: 10px; padding: 12px 20px; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 20px; display: flex; align-items: center; gap: 9px; color: var(--blue); }
+  header h1 svg { font-size: 24px; }
+  #case-name { font-weight: 600; font-size: 18px; width: 300px; padding: 5px 10px; border-radius: 8px; border: 1px solid transparent; background: none; outline: none; }
+  #case-name:hover, #case-name:focus { border-color: var(--line); background: var(--bg-dark); }
+  .spacer { flex: 1; }
+
+  #banner { margin: 0 20px 12px; padding: 10px 16px; border-radius: 10px; font-weight: 600; border: 1px solid var(--yellow); color: var(--yellow);
+            background: color-mix(in srgb, var(--yellow) 10%, var(--bg-dark)); }
+  #banner.end { border-color: var(--red); color: var(--red); background: color-mix(in srgb, var(--red) 12%, var(--bg-dark)); }
+
+  main { display: grid; gap: 14px; padding: 0 20px 24px; grid-template-columns: 350px minmax(0, 1fr) minmax(0, 1fr) 360px;
+         grid-template-areas: "day time time stress" "board board board actions" "tokens team team log"; }
+  .card { background: var(--bg-card); border: 1px solid var(--bg-hl); border-radius: 14px; padding: 14px 18px 16px; box-shadow: 0 2px 10px rgba(0,0,0,.35); min-width: 0; }
+  .card h2 { margin: 0 0 10px; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .card h2 .spacer { flex: 1; }
+  .big { font-size: 44px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+  .big small { font-size: 22px; font-weight: 600; color: var(--muted); }
+  .sub { color: var(--fg-dim); font-size: 14px; margin-top: 4px; }
+  #day-card { grid-area: day; } #time-card { grid-area: time; } #stress-card { grid-area: stress; } #board-card { grid-area: board; }
+  #actions-card { grid-area: actions; } #tokens-card { grid-area: tokens; } #team-card { grid-area: team; } #log-card { grid-area: log; }
+
+  /* days */
+  #days { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .daypill { min-width: 34px; height: 30px; padding: 0 8px; border-radius: 8px; border: 1px solid var(--line); display: grid; place-items: center; font-weight: 700; color: var(--muted); }
+  .daypill.past { background: var(--bg-hl); border-color: var(--bg-hl); text-decoration: line-through; }
+  .daypill.now { background: var(--blue); border-color: var(--blue); color: var(--bg); }
+
+  /* hours */
+  #time-card .row { display: flex; align-items: flex-end; gap: 18px; }
+  #time-card .sub { margin: 0 0 4px; }
+  #track { position: relative; margin-top: 16px; padding-bottom: 22px; }
+  #hours { display: grid; gap: 3px; }
+  .hour { height: 30px; border-radius: 5px; background: var(--bg-hl); border: 1px solid var(--line); }
+  .hour.ot { border-color: color-mix(in srgb, var(--red) 55%, var(--line)); background: color-mix(in srgb, var(--red) 9%, var(--bg-hl)); }
+  .hour.done { background: var(--blue); border-color: var(--blue); }
+  .hour.ot.done { background: var(--red); border-color: var(--red); }
+  .tick { position: absolute; bottom: 0; transform: translateX(-50%); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .tick.end { color: var(--red); font-weight: 700; }
+  #now { position: absolute; top: -7px; width: 3px; height: 44px; background: var(--fg); border-radius: 2px; transform: translateX(-50%); transition: left .25s ease; box-shadow: 0 0 8px var(--fg); }
+  #workend { position: absolute; top: -4px; height: 38px; border-left: 2px dashed var(--red); transform: translateX(-50%); }
+
+  /* stress */
+  #stress-card .row { display: flex; align-items: center; gap: 10px; }
+  #stress-dots { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+  .dot { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line); }
+  .dot.on { background: var(--red); border-color: var(--red); box-shadow: 0 0 8px color-mix(in srgb, var(--red) 60%, transparent); }
+  #stress-card.full { border-color: var(--red); }
+  #stress-card.full .big { color: var(--red); }
+
+  /* locations */
+  #board-card { display: flex; flex-direction: column; }
+  #locations { flex: 1; display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .loc { position: relative; border: 2px solid var(--line); border-radius: 12px; background: var(--bg-dark); padding: 16px 12px 12px; text-align: center;
+         display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 150px; }
+  .loc svg { font-size: 64px; color: var(--muted); stroke-width: 1.5; }
+  .loc .name { font-weight: 700; font-size: 19px; }
+  .loc .base { position: absolute; left: 8px; top: 6px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .loc.here { border-color: var(--blue); background: color-mix(in srgb, var(--blue) 12%, var(--bg-dark)); box-shadow: 0 0 18px color-mix(in srgb, var(--blue) 35%, transparent); }
+  .loc.here svg { color: var(--blue); }
+  .loc .here-tag { margin-top: 8px; background: var(--blue); color: var(--bg); font-weight: 700; border-radius: 14px; padding: 3px 12px; font-size: 14px; }
+  .loc .btn { margin-top: 8px; }
+  .loc .btn.ot { border-color: var(--red); color: var(--red); }
+
+  /* actions */
+  #actions-card label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  #lead-no { width: 100%; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg-dark); outline: none; margin-bottom: 10px; }
+  #lead-no:focus { border-color: var(--blue); }
+  #lead-hours { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+  .hbtn { border: 1px solid var(--line); background: var(--bg-dark); border-radius: 10px; padding: 7px 2px 6px; display: flex; flex-direction: column; align-items: center; gap: 1px; }
+  .hbtn b { font-size: 20px; }
+  .hbtn span { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .hbtn:hover:not(:disabled) { background: var(--bg-hl); border-color: var(--blue); }
+  .hbtn.ot { border-color: color-mix(in srgb, var(--red) 60%, var(--line)); }
+  .hbtn.ot span { color: var(--red); font-weight: 700; }
+  .hbtn:disabled { opacity: .35; cursor: not-allowed; }
+  .stack { display: grid; gap: 8px; margin-top: 14px; }
+  .stack .btn { justify-content: space-between; padding: 9px 14px; }
+  .stack .btn small { color: var(--muted); font-size: 13px; }
+
+  /* tokens */
+  .token { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--bg-hl); }
+  .token:last-child { border-bottom: 0; }
+  .token .chip { width: 16px; height: 16px; border-radius: 50%; background: var(--c); flex: none; }
+  .token .tname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+  .token .count { font-size: 24px; font-weight: 800; min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
+  .token.zero .count { color: var(--muted); }
+  .token.authority { padding-bottom: 12px; margin-bottom: 4px; }
+  .token.authority .tname { font-weight: 700; }
+  .token.authority .count { font-size: 34px; color: var(--yellow); }
+
+  /* team */
+  #team { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); }
+  .member { border: 1px solid var(--line); border-left: 4px solid var(--c); border-radius: 10px; background: var(--bg-dark); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+  .member.sledczy { --c: var(--blue); } .member.konsultant { --c: var(--purple); }
+  .member .top { display: flex; align-items: baseline; gap: 8px; }
+  .member .mname { font-weight: 700; font-size: 17px; flex: 1; min-width: 0; word-break: break-word; }
+  .member .role { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--c); }
+  .member .ability { color: var(--fg-dim); font-size: 14px; white-space: pre-wrap; word-break: break-word; flex: 1; }
+  .member .foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .member .used { color: var(--muted); font-size: 14px; font-style: italic; flex: 1; }
+  .member.spent { opacity: .6; }
+  .placeholder { color: var(--muted); font-size: 14px; }
+
+  /* log */
+  #log { max-height: 330px; overflow-y: auto; display: grid; gap: 2px; font-size: 14px; }
+  .entry { display: grid; grid-template-columns: 74px 1fr; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--bg-hl); }
+  .entry .when { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .entry.stress .what { color: var(--red); } .entry.day .what { color: var(--blue); font-weight: 700; }
+
+  #empty { text-align: center; padding: 90px 20px; color: var(--fg-dim); font-size: 18px; }
+  #empty .btn { margin-top: 18px; font-size: 18px; padding: 10px 22px; }
+
+  /* modals */
+  .modal { position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; }
+  .sheet { position: relative; width: min(680px, calc(100% - 40px)); max-height: calc(100% - 40px); overflow-y: auto; background: var(--bg-dark);
+           border: 1px solid var(--line); border-radius: 14px; padding: 20px 26px 22px; box-shadow: 0 8px 30px rgba(0,0,0,.7); }
+  .sheet h2 { margin: 0 0 4px; font-size: 22px; }
+  .sheet h3 { margin: 18px 0 8px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .sheet p { margin: 6px 0 12px; color: var(--fg-dim); }
+  .sheet .close { position: absolute; right: 12px; top: 12px; border: 0; background: none; font-size: 28px; line-height: 1; color: var(--muted); width: 36px; height: 36px; border-radius: 8px; }
+  .sheet .close:hover { background: var(--bg-hl); color: var(--fg); }
+  .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 14px; }
+  .field { display: grid; gap: 4px; font-size: 14px; color: var(--fg-dim); }
+  .field.wide { grid-column: 1 / -1; }
+  .field input, .field select, .field textarea, .lrow input, .lrow select { padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); outline: none; min-width: 0; }
+  .field input:focus, .field select:focus, .field textarea:focus, .lrow input:focus { border-color: var(--blue); }
+  .field textarea { min-height: 84px; resize: vertical; }
+  .lrow { display: grid; grid-template-columns: 1fr 150px auto auto; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .lrow label { display: flex; align-items: center; gap: 5px; font-size: 14px; color: var(--fg-dim); }
+  .sheet .foot { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; align-items: center; }
+  .sheet .warn { color: var(--yellow); font-size: 14px; margin-right: auto; }
+  .sheet dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 9px 18px; }
+  .sheet dt { font-weight: 700; color: var(--blue); }
+  .sheet dd { margin: 0; color: var(--fg-dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1><svg class="ic" viewBox="0 0 24 24"><path d="M5 3h11l3 3v15H5z"/><path d="M9 8h6M9 12h6M9 16h3"/></svg>Dziennik śledztwa</h1>
+  <input id="case-name" placeholder="Nazwa sprawy" title="Nazwa sprawy" spellcheck="false" hidden>
+  <span class="spacer"></span>
+  <a class="btn" href="index.html" title="Graf osób, spraw, miejsc i dowodów">Tablica dowodów</a>
+  <button class="btn" id="undo" title="Cofa ostatnią akcję">Cofnij</button>
+  <button class="btn" id="new-case">Nowa sprawa</button>
+  <button class="btn" id="settings-btn">Ustawienia</button>
+  <button class="btn" id="help-btn" title="Instrukcja"><b>?</b></button>
+</header>
+<div id="banner" hidden></div>
+
+<main id="main" hidden>
+  <section class="card" id="day-card"><h2>Dzień</h2><div class="big" id="day-big"></div><div id="days"></div></section>
+
+  <section class="card" id="time-card"><h2>Godzina</h2>
+    <div class="row"><div class="big" id="time-big"></div><div class="sub" id="time-sub"></div></div>
+    <div id="track"><div id="hours"></div></div>
+  </section>
+
+  <section class="card" id="stress-card"><h2>Stres</h2>
+    <div class="row"><div class="big" id="stress-big"></div><span class="spacer"></span>
+      <button class="btn round" id="stress-minus" title="Zdejmij żeton stresu">−</button>
+      <button class="btn round" id="stress-plus" title="Dodaj żeton stresu">+</button></div>
+    <div id="stress-dots"></div>
+  </section>
+
+  <section class="card" id="board-card"><h2>Miejsca</h2><div id="locations"></div></section>
+
+  <section class="card" id="actions-card"><h2>Akcje</h2>
+    <label for="lead-no">Trop: numer karty (opcjonalnie)</label>
+    <input id="lead-no" placeholder="np. 214" autocomplete="off">
+    <label>Czas z karty tropu</label>
+    <div id="lead-hours"></div>
+    <div class="stack">
+      <button class="btn" id="report"><span>Napisz raport</span><small id="report-sub"></small></button>
+      <button class="btn" id="end-day"><span>Zakończ dzień</span><small id="end-day-sub"></small></button>
+    </div>
+  </section>
+
+  <section class="card" id="tokens-card"><h2>Żetony</h2><div id="tokens"></div></section>
+
+  <section class="card" id="team-card"><h2>Zespół<span class="spacer"></span><button class="btn small" id="add-member">+ osoba</button></h2><div id="team"></div></section>
+
+  <section class="card" id="log-card"><h2>Przebieg</h2><div id="log"></div></section>
+</main>
+
+<div id="empty" hidden>
+  <div>Nie ma jeszcze żadnej sprawy.</div>
+  <button class="btn primary" id="empty-start">Rozpocznij sprawę</button>
+</div>
+
+<!-- new case -->
+<div class="modal" id="m-case" hidden><form class="sheet">
+  <button type="button" class="close" data-close title="Zamknij">×</button>
+  <h2>Nowa sprawa</h2>
+  <p>Liczby poniżej przepisz z wprowadzenia do sprawy i z kafelków waszego zespołu.</p>
+  <div class="fields">
+    <label class="field wide">Nazwa sprawy<input name="name" placeholder="np. Sprawa 1"></label>
+    <label class="field">Liczba dni<input name="days" type="number" min="1" max="30" required></label>
+    <label class="field">Limit stresu<input name="stressLimit" type="number" min="1" max="50" required></label>
+    <label class="field">Żetony autorytetu na start<input name="authority" type="number" min="0" max="99" required></label>
+  </div>
+  <h3>Żetony umiejętności na start</h3>
+  <div class="fields" id="case-skills"></div>
+  <div class="foot"><span class="warn" id="case-warn" hidden>Rozpoczęcie nowej sprawy kasuje postęp obecnej.</span>
+    <button type="button" class="btn" data-close>Anuluj</button><button class="btn primary">Rozpocznij</button></div>
+</form></div>
+
+<!-- team member -->
+<div class="modal" id="m-member" hidden><form class="sheet">
+  <button type="button" class="close" data-close title="Zamknij">×</button>
+  <h2 id="member-title">Osoba w zespole</h2>
+  <p>Przepisz nazwę i zdolność ze swojego kafelka postaci albo konsultanta.</p>
+  <div class="fields">
+    <label class="field">Imię i nazwisko<input name="name" required></label>
+    <label class="field">Rola<select name="role"><option value="sledczy">Śledczy</option><option value="konsultant">Konsultant</option></select></label>
+    <label class="field wide">Zdolność specjalna<textarea name="ability" placeholder="Treść zdolności z kafelka"></textarea></label>
+    <label class="field">Jak często można użyć<select name="freq"><option value="day">Raz na dzień</option><option value="case">Raz na sprawę</option><option value="free">Bez limitu</option></select></label>
+    <label class="field">Koszt w żetonach autorytetu<input name="cost" type="number" min="0" max="20" value="0"></label>
+  </div>
+  <div class="foot"><button type="button" class="btn danger" id="member-delete" style="margin-right:auto">Usuń z zespołu</button>
+    <button type="button" class="btn" data-close>Anuluj</button><button class="btn primary">Zapisz</button></div>
+</form></div>
+
+<!-- settings -->
+<div class="modal" id="m-settings" hidden><form class="sheet">
+  <button type="button" class="close" data-close title="Zamknij">×</button>
+  <h2>Ustawienia zasad</h2>
+  <p>Wartości domyślne odpowiadają typowym zasadom. Jeśli wasza instrukcja albo sprawa mówi inaczej, zmień je tutaj.</p>
+  <h3>Czas i stres</h3>
+  <div class="fields">
+    <label class="field">Początek dnia (godzina)<input name="dayStart" type="number" min="0" max="23" required></label>
+    <label class="field">Koniec godzin pracy<input name="workEnd" type="number" min="1" max="24" required></label>
+    <label class="field">Koniec toru godzin<input name="trackEnd" type="number" min="1" max="32" required></label>
+    <label class="field">Stres za godzinę nadgodzin<input name="overtimeStress" type="number" min="0" max="5" required></label>
+    <label class="field">Przejście między miejscami (godz.)<input name="travelHours" type="number" min="0" max="5" required></label>
+    <label class="field">Raport: czas (godz.)<input name="reportHours" type="number" min="0" max="5" required></label>
+    <label class="field">Raport: zysk autorytetu<input name="reportAuthority" type="number" min="0" max="5" required></label>
+  </div>
+  <h3>Miejsca na planszy</h3>
+  <div id="set-locations"></div>
+  <button type="button" class="btn small" id="set-add-location">+ miejsce</button>
+  <h3>Rodzaje żetonów umiejętności</h3>
+  <div class="fields" id="set-skills"></div>
+  <div class="foot"><span class="warn" id="set-warn" hidden></span><button type="button" class="btn" data-close>Anuluj</button><button class="btn primary">Zapisz</button></div>
+</form></div>
+
+<!-- help -->
+<div class="modal" id="m-help" hidden><div class="sheet">
+  <button type="button" class="close" data-close title="Zamknij">×</button>
+  <h2>Jak tego używać</h2>
+  <p>Dziennik zastępuje tory na planszy i pulę żetonów. Karty tropów i bazę danych obsługujecie jak zwykle.</p>
+  <dl>
+    <dt>Nowa sprawa</dt><dd>Liczbę dni, limit stresu i startowe żetony przepisujecie z wprowadzenia do sprawy.</dd>
+    <dt>Przejście</dt><dd>Klik „Przejdź" przy miejscu. Każda zmiana miejsca kosztuje godzinę. Tropy bez wskazanego miejsca sprawdzacie bez ruchu.</dd>
+    <dt>Trop</dt><dd>Po odczytaniu karty kliknij liczbę godzin z karty. Numer karty trafia do przebiegu, jeśli go wpiszesz.</dd>
+    <dt>Nadgodziny</dt><dd>Każda godzina po końcu godzin pracy dodaje żeton stresu. Przycisk pokazuje na czerwono, ile stresu kosztuje akcja.</dd>
+    <dt>Limit stresu</dt><dd>Gdy stres osiągnie limit, śledztwo kończy się po bieżącej akcji i przechodzicie do raportu końcowego.</dd>
+    <dt>Raport</dt><dd>Raz dziennie, tylko w godzinach pracy: godzina czasu i żeton autorytetu.</dd>
+    <dt>Koniec dnia</dt><dd>Możliwy o dowolnej godzinie. Czas wraca na początek dnia, zespół do bazy, zdolności „raz na dzień" się odnawiają. Żetony umiejętności i stres zostają.</dd>
+    <dt>Żetony</dt><dd>„Użyj" zdejmuje żeton umiejętności przy pogłębianiu tropu. Plus i minus służą do efektów z kart i poprawek.</dd>
+    <dt>Zespół</dt><dd>Dodaj śledczych i konsultantów z ich zdolnościami. „Użyj" oznacza zdolność jako wykorzystaną i pobiera koszt w autorytecie, jeśli go ustawisz.</dd>
+    <dt>Cofnij</dt><dd>Cofa ostatnie akcje, krok po kroku (do 40 wstecz).</dd>
+    <dt>Ustawienia</dt><dd>Godziny, koszty, nazwy miejsc i żetonów. Zmień je, jeśli wasza instrukcja mówi inaczej.</dd>
+  </dl>
+</div></div>
+
+<script>
+const ICONS = {
+  hq:     '<path d="M4 21V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v16"/><path d="M15 10h4a1 1 0 0 1 1 1v10"/><path d="M2 21h20"/><path d="M8 8h3M8 12h3M8 16h3"/>',
+  lab:    '<path d="M9 3h6"/><path d="M10 3v6l-5 9a2 2 0 0 0 1.8 3h10.4a2 2 0 0 0 1.8-3l-5-9V3"/><path d="M7.5 15h9"/>',
+  court:  '<path d="M3 21h18"/><path d="M4 10h16"/><path d="M12 3 3 8h18z"/><path d="M6 10v8M10 10v8M14 10v8M18 10v8"/>',
+  police: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+  field:  '<circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/>',
+  pin:    '<path d="M12 22s7-6.2 7-12a7 7 0 1 0-14 0c0 5.8 7 12 7 12z"/><circle cx="12" cy="10" r="2.5"/>',
+};
+const ICON_NAMES = { hq: 'Budynek', lab: 'Kolba', court: 'Kolumny', police: 'Odznaka', field: 'Kompas', pin: 'Pinezka' };
+const icon = name => { const s = document.createElement('span'); s.innerHTML = `<svg class="ic" viewBox="0 0 24 24">${ICONS[name] || ICONS.pin}</svg>`; return s.firstChild; };
+
+const uid = p => p + Math.random().toString(36).slice(2, 10);
+const $ = s => document.querySelector(s);
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === 'class') el.className = v;
+    else if (k === 'text') el.textContent = v;
+    else if (k === 'dataset') Object.assign(el.dataset, v);
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'disabled') el.disabled = !!v;
+    else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid);
+  return el;
+}
+
+/* ---------- state ----------
+   store = { rules, locations: [{ id, name, icon }], baseId, skills: [{ id, name, color }],
+             team: [{ id, name, role, ability, freq: 'day' | 'case' | 'free', cost }],
+             case: null | { name, days, stressLimit, day, time, stress, authority, skills: { skillId: count },
+                            locationId, reportToday, daysDone, used: { memberId: true }, log: [{ day, time, text, kind }] },
+             history: [serialised case]   undo stack, newest last }
+   Time is whole hours on a 24h clock; values past 24 mean after midnight. */
+
+const KEY = 'detektyw-dziennik.v1';
+const defaults = () => ({
+  rules: { dayStart: 8, workEnd: 16, trackEnd: 24, overtimeStress: 1, travelHours: 1, reportHours: 1, reportAuthority: 1 },
+  locations: [
+    { id: 'l1', name: 'Komenda', icon: 'hq' }, { id: 'l2', name: 'Laboratorium', icon: 'lab' }, { id: 'l3', name: 'Sąd', icon: 'court' },
+    { id: 'l4', name: 'Posterunek', icon: 'police' }, { id: 'l5', name: 'Teren', icon: 'field' },
+  ],
+  baseId: 'l1',
+  skills: [
+    { id: 's1', name: 'Analiza', color: '#bb9af7' }, { id: 's2', name: 'Technika', color: '#7dcfff' }, { id: 's3', name: 'Przesłuchanie', color: '#ff9e64' },
+    { id: 's4', name: 'Spostrzegawczość', color: '#9ece6a' }, { id: 's5', name: 'Dowolna', color: '#c0caf5' },
+  ],
+  team: [], case: null, history: [],
+});
+
+let saveFailed = false;
+function load() {
+  let raw = null;
+  try { raw = localStorage.getItem(KEY); } catch (_) {}
+  if (raw) {
+    try {
+      const s = JSON.parse(raw);
+      if (s.rules && Array.isArray(s.locations) && s.locations.length && Array.isArray(s.skills) && Array.isArray(s.team)) return { ...defaults(), ...s };
+    } catch (_) {}
+    // Unreadable data would be overwritten by the next save: keep a copy aside.
+    try { localStorage.setItem(KEY + '.broken', raw); } catch (_) {}
+  }
+  return defaults();
+}
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(store)); saveFailed = false; } catch (_) { saveFailed = true; }
+}
+
+let store = load();
+const R = () => store.rules;
+const clock = t => String(((t % 24) + 24) % 24).padStart(2, '0') + ':00';
+const hoursWord = n => n === 1 ? 'godzina' : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'godziny' : 'godzin');
+const locName = id => (store.locations.find(l => l.id === id) || {}).name || '?';
+
+/* ---------- rules ---------- */
+
+// Stress for working from `from` to `from + hours`: every hour after the end of working hours costs.
+const overtimeCost = (from, hours) => Math.max(0, from + hours - Math.max(from, R().workEnd)) * R().overtimeStress;
+const fits = hours => store.case.time + hours <= R().trackEnd;
+// The investigation is over once the last day has ended or stress has reached the limit.
+const finished = () => { const c = store.case; return c.daysDone ? 'days' : c.stress >= c.stressLimit ? 'stress' : null; };
+
+// Every game action goes through here: snapshot for undo, change, log, save, redraw.
+function act(change) {
+  const c = store.case;
+  store.history.push(JSON.stringify(c));
+  if (store.history.length > 40) store.history.shift();  // every snapshot carries the whole log, so keep the stack short
+  change(c);
+  save(); render();
+}
+const log = (c, text, kind) => c.log.push({ day: c.day, time: c.time, text, kind });
+
+function spend(c, hours) {
+  const stress = overtimeCost(c.time, hours);
+  c.time += hours; c.stress += stress;
+  return stress;
+}
+const stressNote = n => n ? `, nadgodziny: +${n} stresu` : '';
+
+function followLead(hours) {
+  const no = $('#lead-no').value.trim().replace(/^#/, '');
+  act(c => {
+    const s = spend(c, hours);
+    log(c, `Trop${no ? ' #' + no : ''}: ${hours} ${hoursWord(hours)}${stressNote(s)}`, s ? 'stress' : '');
+  });
+  $('#lead-no').value = '';
+}
+function moveTo(id) {
+  act(c => {
+    const s = spend(c, R().travelHours);
+    c.locationId = id;
+    log(c, `Przejście: ${locName(id)}${stressNote(s)}`, s ? 'stress' : '');
+  });
+}
+const canReport = () => { const c = store.case; return !finished() && !c.reportToday && c.time + R().reportHours <= R().workEnd; };
+function writeReport() {
+  act(c => { spend(c, R().reportHours); c.authority += R().reportAuthority; c.reportToday = true; log(c, `Raport: +${R().reportAuthority} autorytetu`); });
+}
+function endDay() {
+  act(c => {
+    if (c.day >= c.days) { c.daysDone = true; return log(c, `Koniec dnia ${c.day}: ostatni dzień sprawy`, 'day'); }
+    log(c, `Koniec dnia ${c.day}`, 'day');
+    c.day += 1; c.time = R().dayStart; c.locationId = store.baseId; c.reportToday = false;
+    for (const m of store.team) if (m.freq === 'day') delete c.used[m.id];
+  });
+}
+function changeToken(what, delta, note) {
+  act(c => {
+    if (what === 'stress') { c.stress = Math.max(0, c.stress + delta); log(c, `Stres ${delta > 0 ? '+' : '−'}1 (ręcznie)`, delta > 0 ? 'stress' : ''); }
+    else if (what === 'authority') { c.authority = Math.max(0, c.authority + delta); log(c, `Autorytet ${delta > 0 ? '+' : '−'}1`); }
+    else { c.skills[what] = Math.max(0, (c.skills[what] || 0) + delta); log(c, note); }
+  });
+}
+const canUse = m => { const c = store.case; return !finished() && !c.used[m.id] && c.authority >= (m.cost || 0); };
+function useAbility(m) {
+  act(c => {
+    c.authority -= m.cost || 0;
+    if (m.freq !== 'free') c.used[m.id] = true;
+    log(c, `Zdolność: ${m.name}${m.cost ? ` (−${m.cost} autorytetu)` : ''}`);
+  });
+}
+function undo() {
+  if (!store.history.length) return;
+  store.case = JSON.parse(store.history.pop());
+  save(); render();
+}
+
+/* ---------- rendering ---------- */
+
+function render() {
+  const c = store.case;
+  $('#main').hidden = !c; $('#empty').hidden = !!c; $('#case-name').hidden = !c;
+  $('#undo').disabled = !c || !store.history.length;
+  renderBanner();
+  if (!c) return;
+  if (document.activeElement !== $('#case-name')) $('#case-name').value = c.name;
+  document.title = (c.name || 'Sprawa') + ' · Dziennik śledztwa';
+  renderDay(); renderTime(); renderStress(); renderLocations(); renderActions(); renderTokens(); renderTeam(); renderLog();
+}
+
+function renderBanner() {
+  const b = $('#banner'), c = store.case, end = c && finished();
+  let text = '';
+  if (saveFailed) text = 'Zapis nie działa: po zamknięciu strony stan przepadnie.';
+  else if (end === 'stress') text = 'Limit stresu osiągnięty. Śledztwo się kończy: czas na raport końcowy.';
+  else if (end === 'days') text = 'Ostatni dzień zakończony. Czas na raport końcowy.';
+  else if (c && c.time === R().workEnd) text = `Godziny pracy się skończyły. Zakończcie dzień albo pracujcie dalej: każda godzina nadgodzin to +${R().overtimeStress} stresu.`;
+  else if (c && c.time > R().workEnd) text = `Nadgodziny: każda kolejna godzina to +${R().overtimeStress} stresu.`;
+  b.textContent = text; b.hidden = !text;
+  b.classList.toggle('end', saveFailed || !!end);
+}
+
+function renderDay() {
+  const c = store.case;
+  $('#day-big').replaceChildren(String(c.day), h('small', { text: ' / ' + c.days }));
+  $('#days').replaceChildren(...Array.from({ length: c.days }, (_, i) =>
+    h('div', { class: 'daypill' + (i + 1 < c.day || c.daysDone ? ' past' : i + 1 === c.day ? ' now' : ''), text: i + 1 })));
+}
+
+function renderTime() {
+  const c = store.case, r = R(), n = r.trackEnd - r.dayStart, pos = t => (t - r.dayStart) / n * 100 + '%';
+  $('#time-big').textContent = clock(c.time);
+  const left = r.workEnd - c.time;
+  $('#time-sub').textContent = left > 0 ? `${left} ${hoursWord(left)} do końca pracy` : left === 0 ? 'koniec godzin pracy' : `${-left} ${hoursWord(-left)} nadgodzin`;
+  const hours = $('#hours');
+  hours.style.gridTemplateColumns = `repeat(${n}, 1fr)`;
+  hours.replaceChildren(...Array.from({ length: n }, (_, i) => {
+    const t = r.dayStart + i;
+    return h('div', { class: 'hour' + (t >= r.workEnd ? ' ot' : '') + (t < c.time ? ' done' : ''), title: `${clock(t)} – ${clock(t + 1)}` });
+  }));
+  const track = $('#track');
+  track.querySelectorAll('.tick, #now, #workend').forEach(e => e.remove());
+  const step = n > 18 ? 2 : 1;
+  for (let t = r.dayStart; t <= r.trackEnd; t++) {
+    if ((t - r.dayStart) % step && t !== r.workEnd) continue;
+    track.append(h('div', { class: 'tick' + (t === r.workEnd ? ' end' : ''), style: `left:${pos(t)}`, text: String(((t % 24) + 24) % 24) }));
+  }
+  if (r.workEnd > r.dayStart && r.workEnd < r.trackEnd) track.append(h('div', { id: 'workend', style: `left:${pos(r.workEnd)}`, title: 'Koniec godzin pracy' }));
+  track.append(h('div', { id: 'now', style: `left:${pos(Math.min(c.time, r.trackEnd))}` }));
+}
+
+function renderStress() {
+  const c = store.case;
+  $('#stress-big').replaceChildren(String(c.stress), h('small', { text: ' / ' + c.stressLimit }));
+  $('#stress-card').classList.toggle('full', c.stress >= c.stressLimit);
+  $('#stress-dots').replaceChildren(...Array.from({ length: Math.max(c.stressLimit, c.stress) }, (_, i) => h('div', { class: 'dot' + (i < c.stress ? ' on' : '') })));
+  $('#stress-minus').disabled = c.stress <= 0;
+}
+
+function renderLocations() {
+  const c = store.case, r = R(), end = finished(), cost = overtimeCost(c.time, r.travelHours);
+  $('#locations').replaceChildren(...store.locations.map(l => {
+    const here = l.id === c.locationId;
+    return h('div', { class: 'loc' + (here ? ' here' : ''), dataset: { loc: l.id } },
+      l.id === store.baseId && h('span', { class: 'base', text: 'baza' }),
+      icon(l.icon), h('div', { class: 'name', text: l.name }),
+      here ? h('div', { class: 'here-tag', text: 'Zespół tutaj' })
+           : h('button', { class: 'btn small' + (cost ? ' ot' : ''), disabled: !!end || !fits(r.travelHours), onclick: () => moveTo(l.id),
+                           text: `Przejdź · ${r.travelHours} h${cost ? ` · +${cost} stresu` : ''}` }));
+  }));
+}
+
+function renderActions() {
+  const c = store.case, r = R(), end = finished();
+  $('#lead-hours').replaceChildren(...[1, 2, 3, 4, 5].map(n => {
+    const cost = overtimeCost(c.time, n);
+    return h('button', { class: 'hbtn' + (cost ? ' ot' : ''), disabled: !!end || !fits(n), onclick: () => followLead(n), dataset: { hours: n },
+                         title: `Trop na ${n} ${hoursWord(n)}: koniec o ${clock(c.time + n)}` },
+      h('b', { text: n + ' h' }), h('span', { text: cost ? `+${cost} stresu` : '→ ' + clock(c.time + n) }));
+  }));
+  $('#report').disabled = !canReport();
+  $('#report-sub').textContent = c.reportToday ? 'dziś już napisany' : c.time + r.reportHours > r.workEnd ? 'nie w nadgodzinach'
+    : `${r.reportHours} h · +${r.reportAuthority} autorytetu`;
+  $('#end-day').disabled = !!end;
+  $('#end-day-sub').textContent = c.day >= c.days ? 'ostatni dzień sprawy' : `dzień ${c.day + 1} od ${clock(r.dayStart)}`;
+}
+
+function renderTokens() {
+  const c = store.case;
+  const row = (cls, color, name, count, ...buttons) =>
+    h('div', { class: `token ${cls}${count ? '' : ' zero'}`, style: `--c:${color}` }, h('span', { class: 'chip' }), h('span', { class: 'tname', text: name, title: name }),
+      h('span', { class: 'count', text: count }), buttons);
+  $('#tokens').replaceChildren(
+    row('authority', 'var(--yellow)', 'Autorytet', c.authority,
+      h('button', { class: 'btn round', text: '−', title: 'Wydaj żeton autorytetu', disabled: c.authority <= 0, dataset: { act: 'auth-' }, onclick: () => changeToken('authority', -1) }),
+      h('button', { class: 'btn round', text: '+', title: 'Dodaj żeton autorytetu', dataset: { act: 'auth+' }, onclick: () => changeToken('authority', 1) })),
+    ...store.skills.map(s => { const n = c.skills[s.id] || 0; return row('', s.color, s.name, n,
+      h('button', { class: 'btn small', text: 'Użyj', title: 'Wydaj żeton, np. na pogłębienie tropu', disabled: n <= 0, dataset: { use: s.id },
+                    onclick: () => changeToken(s.id, -1, `Żeton umiejętności: ${s.name}`) }),
+      h('button', { class: 'btn small', text: '+', title: 'Dodaj żeton', dataset: { add: s.id }, onclick: () => changeToken(s.id, 1, `Żeton umiejętności +1: ${s.name}`) })); }));
+}
+
+const ROLE = { sledczy: 'Śledczy', konsultant: 'Konsultant' };
+const FREQ_USED = { day: 'użyta dziś', case: 'użyta w tej sprawie' };
+function renderTeam() {
+  const c = store.case;
+  $('#team').replaceChildren(...(store.team.length ? store.team.map(m => {
+    const used = !!c.used[m.id];
+    return h('div', { class: `member ${m.role}${used ? ' spent' : ''}`, dataset: { member: m.id } },
+      h('div', { class: 'top' }, h('span', { class: 'mname', text: m.name }), h('span', { class: 'role', text: ROLE[m.role] })),
+      h('div', { class: 'ability', text: m.ability || 'Brak opisu zdolności.' }),
+      h('div', { class: 'foot' },
+        used ? h('span', { class: 'used', text: FREQ_USED[m.freq] })
+             : h('button', { class: 'btn small', disabled: !canUse(m), onclick: () => useAbility(m), dataset: { useAbility: m.id },
+                             title: c.authority < (m.cost || 0) ? 'Za mało żetonów autorytetu' : '', text: 'Użyj zdolności' + (m.cost ? ` · −${m.cost} autorytetu` : '') }),
+        !used && h('span', { class: 'spacer' }),
+        h('button', { class: 'btn small', text: 'Edytuj', onclick: () => openMember(m) })));
+  }) : [h('div', { class: 'placeholder', text: 'Dodaj śledczych i konsultantów, żeby śledzić ich zdolności.' })]));
+}
+
+function renderLog() {
+  const c = store.case;
+  $('#log').replaceChildren(...(c.log.length ? [...c.log].reverse().map(e =>
+    h('div', { class: 'entry ' + (e.kind || '') }, h('span', { class: 'when', text: `D${e.day} ${clock(e.time)}` }), h('span', { class: 'what', text: e.text })))
+    : [h('div', { class: 'placeholder', text: 'Tu pojawi się przebieg śledztwa.' })]));
+}
+
+/* ---------- modals ---------- */
+
+const modals = [...document.querySelectorAll('.modal')];
+const openModal = m => { m.hidden = false; const f = m.querySelector('input:not([type=radio]), textarea, select'); if (f) { f.focus(); if (f.select) f.select(); } };
+const closeModal = m => { m.hidden = true; };
+for (const m of modals) {
+  m.addEventListener('mousedown', e => { if (e.target === m) closeModal(m); });
+  m.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', () => closeModal(m)));
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') modals.forEach(closeModal); });
+const int = (form, name, fallback = 0) => { const v = parseInt(form.elements[name].value, 10); return Number.isFinite(v) ? v : fallback; };
+
+// new case
+const mCase = $('#m-case'), fCase = mCase.querySelector('form');
+function openCase() {
+  const prev = store.case;
+  $('#case-warn').hidden = !prev;
+  fCase.reset();
+  fCase.elements.name.value = prev ? '' : 'Sprawa 1';
+  $('#case-skills').replaceChildren(...store.skills.map(s =>
+    h('label', { class: 'field' }, s.name, h('input', { name: 'skill-' + s.id, type: 'number', min: 0, max: 20, value: 0, required: '' }))));
+  openModal(mCase);
+}
+fCase.addEventListener('submit', e => {
+  e.preventDefault();
+  store.case = {
+    name: fCase.elements.name.value.trim() || 'Sprawa', days: Math.max(1, int(fCase, 'days', 1)), stressLimit: Math.max(1, int(fCase, 'stressLimit', 1)),
+    day: 1, time: R().dayStart, stress: 0, authority: Math.max(0, int(fCase, 'authority')),
+    skills: Object.fromEntries(store.skills.map(s => [s.id, Math.max(0, int(fCase, 'skill-' + s.id))])),
+    locationId: store.baseId, reportToday: false, daysDone: false, used: {}, log: [],
+  };
+  store.history = [];
+  save(); closeModal(mCase); render();
+});
+
+// team member
+const mMember = $('#m-member'), fMember = mMember.querySelector('form');
+let editing = null;
+function openMember(m) {
+  editing = m || null;
+  fMember.reset();
+  $('#member-title').textContent = m ? 'Edycja osoby' : 'Nowa osoba w zespole';
+  $('#member-delete').hidden = !m;
+  $('#member-delete').textContent = 'Usuń z zespołu';
+  if (m) for (const k of ['name', 'role', 'ability', 'freq', 'cost']) fMember.elements[k].value = m[k];
+  openModal(mMember);
+}
+fMember.addEventListener('submit', e => {
+  e.preventDefault();
+  const data = { name: fMember.elements.name.value.trim(), role: fMember.elements.role.value, ability: fMember.elements.ability.value.trim(),
+                 freq: fMember.elements.freq.value, cost: Math.max(0, int(fMember, 'cost')) };
+  if (editing) Object.assign(editing, data); else store.team.push({ id: uid('m'), ...data });
+  save(); closeModal(mMember); render();
+});
+// Deleting asks for a second click instead of a browser dialog, which some embedded viewers block.
+$('#member-delete').addEventListener('click', e => {
+  if (e.target.textContent !== 'Na pewno usunąć?') { e.target.textContent = 'Na pewno usunąć?'; return; }
+  store.team = store.team.filter(m => m !== editing);
+  if (store.case) delete store.case.used[editing.id];
+  save(); closeModal(mMember); render();
+});
+
+// settings
+const mSet = $('#m-settings'), fSet = mSet.querySelector('form');
+const RULE_FIELDS = ['dayStart', 'workEnd', 'trackEnd', 'overtimeStress', 'travelHours', 'reportHours', 'reportAuthority'];
+function locationRow(l, base) {
+  const row = h('div', { class: 'lrow', dataset: { id: l.id } },
+    h('input', { value: l.name, placeholder: 'Nazwa miejsca', required: '' }),
+    h('select', {}, Object.entries(ICON_NAMES).map(([k, v]) => h('option', { value: k, text: v, selected: k === l.icon ? '' : null }))),
+    h('label', { title: 'Tu zespół zaczyna każdy dzień' }, h('input', { type: 'radio', name: 'base', value: l.id, checked: base ? '' : null }), 'baza'),
+    h('button', { type: 'button', class: 'btn small', text: '×', title: 'Usuń miejsce', onclick: () => row.remove() }));
+  return row;
+}
+function openSettings() {
+  for (const k of RULE_FIELDS) fSet.elements[k].value = R()[k];
+  $('#set-locations').replaceChildren(...store.locations.map(l => locationRow(l, l.id === store.baseId)));
+  $('#set-skills').replaceChildren(...store.skills.map(s => h('label', { class: 'field' }, 'Żeton', h('input', { name: 'sk-' + s.id, value: s.name, required: '' }))));
+  $('#set-warn').hidden = true;
+  openModal(mSet);
+}
+$('#set-add-location').addEventListener('click', () => { const row = locationRow({ id: uid('l'), name: '', icon: 'pin' }, false); $('#set-locations').append(row); row.querySelector('input').focus(); });
+fSet.addEventListener('submit', e => {
+  e.preventDefault();
+  const warn = text => { $('#set-warn').textContent = text; $('#set-warn').hidden = false; };
+  const rules = Object.fromEntries(RULE_FIELDS.map(k => [k, int(fSet, k)]));
+  if (!(rules.dayStart < rules.workEnd && rules.workEnd <= rules.trackEnd)) return warn('Godziny muszą rosnąć: początek dnia, koniec pracy, koniec toru.');
+  const rows = [...$('#set-locations').children];
+  if (!rows.length) return warn('Potrzebne jest przynajmniej jedno miejsce.');
+  const locations = rows.map(r => ({ id: r.dataset.id, name: r.querySelector('input').value.trim(), icon: r.querySelector('select').value }));
+  const base = rows.find(r => r.querySelector('input[type=radio]').checked);
+  store.rules = rules; store.locations = locations; store.baseId = base ? base.dataset.id : locations[0].id;
+  for (const s of store.skills) s.name = fSet.elements['sk-' + s.id].value.trim() || s.name;
+  const c = store.case;
+  if (c) {
+    if (!locations.some(l => l.id === c.locationId)) c.locationId = store.baseId;
+    c.time = Math.min(Math.max(c.time, rules.dayStart), rules.trackEnd);
+  }
+  save(); closeModal(mSet); render();
+});
+
+/* ---------- wiring ---------- */
+
+$('#undo').onclick = undo;
+$('#new-case').onclick = openCase;
+$('#empty-start').onclick = openCase;
+$('#settings-btn').onclick = openSettings;
+$('#help-btn').onclick = () => openModal($('#m-help'));
+$('#add-member').onclick = () => openMember(null);
+$('#report').onclick = writeReport;
+$('#end-day').onclick = endDay;
+$('#stress-plus').onclick = () => changeToken('stress', 1);
+$('#stress-minus').onclick = () => changeToken('stress', -1);
+$('#case-name').addEventListener('input', e => { store.case.name = e.target.value; document.title = (store.case.name || 'Sprawa') + ' · Dziennik śledztwa'; save(); });
+$('#case-name').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === 'Escape') e.target.blur(); });
+
+render();
+if (!store.case) openCase();
+</script>
+</body>
+</html>
