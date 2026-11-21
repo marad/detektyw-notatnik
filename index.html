@@ -1,0 +1,1056 @@
+<!doctype html>
+<!--
+  Investigation notes for a detective board game: a graph of people, cases, places and evidence
+  with free-standing notes and card-number leads. Single file, no build, no server.
+  Boards are stored in this browser's localStorage and can be exported to / imported from JSON files.
+-->
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<title>Notatnik detektywa</title>
+<style>
+  /* Tokyo Night palette */
+  :root { --bg: #1a1b26; --bg-dark: #16161e; --bg-card: #24283b; --bg-hl: #292e42; --line: #414868;
+          --fg: #c0caf5; --fg-dim: #a9b1d6; --muted: #565f89; --sel: #33467c; color-scheme: dark; }
+  .loose { --c: #a9b1d6; }
+  .g0 { --c: #bb9af7; } .g1 { --c: #7dcfff; } .g2 { --c: #73daca; } .g3 { --c: #ff9e64; }
+
+  /* A group is a frame behind the cards. Only its header and corners take the mouse,
+     so the area inside still behaves like empty board. */
+  .group { position: absolute; z-index: 0; border: 2px solid var(--c); border-radius: 10px; pointer-events: none;
+           background: color-mix(in srgb, var(--c) 7%, transparent); }
+  .gbar { pointer-events: auto; cursor: move; padding: 5px 14px 6px; border-radius: 7px 7px 0 0; color: var(--c);
+          background: color-mix(in srgb, var(--c) 22%, var(--bg)); display: flex; align-items: center; gap: 8px; }
+  .gbar .ticon { flex: none; width: 22px; height: 22px; }
+  .gtitle { flex: 1; min-width: 0; font-weight: 700; font-size: 20px; outline: none; word-break: break-word; }
+  .gtitle[contenteditable] { cursor: text; background: var(--sel); color: var(--fg); border-radius: 3px; }
+  .gresize { pointer-events: auto; position: absolute; width: 18px; height: 18px; }
+  .gresize.nw { left: -6px; top: -6px; cursor: nwse-resize; } .gresize.se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+  .gresize.ne { right: -6px; top: -6px; cursor: nesw-resize; } .gresize.sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
+  .gresize.se::after { content: ''; position: absolute; right: 7px; bottom: 7px; width: 10px; height: 10px;
+                       border-right: 3px solid var(--c); border-bottom: 3px solid var(--c); border-radius: 0 0 4px 0; }
+  .osoba { --c: #7aa2f7; } .sprawa { --c: #f7768e; } .miejsce { --c: #9ece6a; } .dowod { --c: #e0af68; }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; font: 16px/1.4 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  button { font: inherit; cursor: pointer; color: inherit; }
+  input[type=checkbox] { accent-color: #7aa2f7; width: 17px; height: 17px; flex: none; }
+  #app { position: relative; height: 100%; }
+
+  #canvas { position: absolute; inset: 0; overflow: hidden; cursor: grab; background-color: var(--bg);
+            background-image: radial-gradient(#343a55 1px, transparent 1px); }
+  #canvas.panning, #canvas.panning * { cursor: grabbing !important; }
+  #world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+  #world.anim { transition: transform .3s ease; }
+  #edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; z-index: 1; }
+  #edges .edge { stroke: var(--fg-dim); stroke-width: 2; }
+  #edges .edge.hyp { stroke-dasharray: 7 6; }
+  #arrow path { fill: var(--fg-dim); }
+  #edges .tether { stroke: var(--c); stroke-width: 1; stroke-dasharray: 2 3; opacity: .8; }
+  #overlay { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; z-index: 4; display: none; }
+  #canvas.connecting #overlay, #canvas.pending #overlay { display: block; }
+  #canvas.connecting, #canvas.connecting * { cursor: crosshair !important; }
+  #temp { stroke: #7dcfff; stroke-width: 3; stroke-dasharray: 8 6; stroke-linecap: round; }
+
+  .node { position: absolute; width: 280px; background: var(--bg-card); border-radius: 8px; z-index: 2; cursor: default;
+          box-shadow: 0 2px 8px rgba(0,0,0,.5); border: 2px solid var(--c); }
+  .node.source { outline: 3px dashed #7dcfff; outline-offset: 3px; }
+  .node.target { outline: 4px solid #7dcfff; outline-offset: 3px; box-shadow: 0 0 22px #7dcfff; }
+  .node.flash { animation: flash 1.4s; }
+  @keyframes flash { 0%, 60% { box-shadow: 0 0 0 8px rgba(224,175,104,.85); } 100% { box-shadow: 0 2px 8px rgba(0,0,0,.5); } }
+  .head { position: relative; background: var(--c); color: var(--bg); padding: 3px 5px 8px 10px; cursor: move; border-radius: 5px 5px 0 0; }
+  .node.collapsed .head { border-radius: 5px; }
+  .head .trow { display: flex; gap: 7px; align-items: flex-start; }
+  .head .trow .title { flex: 1; min-width: 0; }
+  .ticon svg { display: block; width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+  .head .ticon { flex: none; width: 22px; height: 22px; margin-top: 2px; }
+  #typemenu .ticon { width: 20px; height: 20px; color: var(--c); }
+  .head .row { display: flex; align-items: center; gap: 2px; }
+  .head .type { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; opacity: .75; flex: 1; }
+  .head .icon { color: var(--bg); width: 32px; height: 30px; font-size: 24px; }
+  .head .icon:hover { background: rgba(0,0,0,.2); }
+  .title { font-weight: 700; font-size: 18px; min-height: 25px; outline: none; word-break: break-word; }
+  .title[contenteditable] { cursor: text; background: rgba(255,255,255,.3); border-radius: 3px; }
+  .summary { font-size: 13px; opacity: .8; margin-top: 2px; }
+  .handle { position: absolute; right: -10px; top: 50%; margin-top: -9px; width: 18px; height: 18px; border-radius: 50%;
+            background: var(--fg); border: 2px solid var(--bg); cursor: crosshair; opacity: .3; }
+  .node:hover .handle { opacity: 1; }
+  .body { padding: 8px 10px 10px; }
+
+  .icon { border: 0; background: none; padding: 0 6px; font-size: 20px; line-height: 1; color: var(--muted); border-radius: 4px; }
+  .icon:hover { background: rgba(255,255,255,.12); color: var(--fg); }
+  [data-ph]:empty::before { content: attr(data-ph); color: var(--muted); font-weight: normal; }
+  .head [data-ph]:empty::before { color: rgba(26,27,38,.55); }
+
+  .comment:focus { background: var(--sel); }
+
+  .leads:not(:empty) { margin-bottom: 8px; }
+  .lead { display: flex; align-items: flex-start; gap: 6px; padding: 3px 0; font-size: 15px; }
+  .lead input[type=checkbox] { margin: 2px 0 0; }
+  .lead .num { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--c); }
+  .lead .comment { flex: 1; outline: none; border-radius: 3px; padding: 0 2px; min-height: 21px; word-break: break-word; cursor: text; }
+  .lead .icon { visibility: hidden; }
+  .lead:hover .icon { visibility: visible; }
+  .lead.done .num, .lead.done .comment { text-decoration: line-through; color: var(--muted); }
+  .lead-form { display: flex; gap: 5px; align-items: center; padding: 3px 0; font-weight: 700; }
+  .lead-form input { font: inherit; font-weight: normal; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; min-width: 0;
+                     background: var(--bg); color: var(--fg); }
+  .lead-form .f-num { width: 76px; } .lead-form .f-comment { flex: 1; }
+  .actions { display: flex; gap: 8px; }
+  .actions button { flex: 1; border: 1px dashed var(--line); background: none; color: var(--fg-dim); border-radius: 6px; padding: 6px 10px; font-size: 15px; }
+  .actions button:hover { background: var(--bg-hl); color: var(--fg); border-color: var(--muted); }
+
+  .sticky { position: absolute; width: 230px; z-index: 2; cursor: grab; border-radius: 4px; border-left: 3px solid var(--c);
+            background: color-mix(in srgb, var(--c) 14%, var(--bg-card)); box-shadow: 0 2px 6px rgba(0,0,0,.5); }
+  .sticky .text { padding: 7px 28px 7px 10px; outline: none; min-height: 36px; white-space: pre-wrap; word-break: break-word; }
+  .sticky .text[contenteditable] { cursor: text; background: var(--sel); border-radius: 0 4px 4px 0; }
+  .sticky .del { position: absolute; right: 2px; top: 5px; visibility: hidden; }
+  .sticky:hover .del { visibility: visible; }
+
+  .edge-label { position: absolute; z-index: 3; transform: translate(-50%, -50%); background: var(--bg-dark); border: 1px solid var(--muted);
+                border-radius: 12px; padding: 1px 10px; font-size: 14px; white-space: nowrap; cursor: grab; }
+  .edge-label.hyp { border-style: dashed; font-style: italic; }
+  .edge-label.hyp .text::after { content: ' ?'; font-weight: 700; color: #e0af68; }
+  .edge-label .text { outline: none; display: inline-block; min-width: 34px; text-align: center; border-radius: 8px; }
+  .edge-label .text[contenteditable] { cursor: text; background: var(--sel); }
+  /* The buttons linger for a moment after the pointer leaves, so they can be reached without rushing. */
+  .edge-label .ctl { position: absolute; left: 50%; top: 100%; transform: translateX(-50%); display: flex; padding-top: 6px; gap: 6px; font-style: normal;
+                     visibility: hidden; opacity: 0; transition: visibility 0s .7s, opacity .15s .7s; }
+  .edge-label:hover, .edge-label.keep { z-index: 4; }
+  .edge-label:hover .ctl, .edge-label:focus-within .ctl, .edge-label.keep .ctl { visibility: visible; opacity: 1; transition-delay: 0s; }
+  .edge-label .ctl button { background: var(--line); color: var(--fg); border: 0; font-size: 15px; padding: 7px 14px; border-radius: 16px; box-shadow: 0 2px 6px rgba(0,0,0,.5); }
+  .edge-label .ctl button:hover { background: var(--muted); }
+
+  #toolbar { position: absolute; left: 10px; top: 10px; z-index: 5; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; cursor: default; }
+  #toolbar button { border: 1px solid var(--line); background: var(--bg-dark); border-radius: 6px; padding: 5px 12px; }
+  #toolbar button:hover { background: var(--bg-hl); }
+  #help-btn { font-weight: 700; min-width: 36px; }
+  #typemenu { position: absolute; z-index: 6; background: var(--bg-dark); border: 1px solid var(--line); border-radius: 6px;
+              box-shadow: 0 2px 10px rgba(0,0,0,.6); padding: 4px; display: flex; flex-direction: column; gap: 2px; }
+  #typemenu button { border: 0; background: none; text-align: left; padding: 6px 16px 6px 10px; display: flex; align-items: center; gap: 10px; }
+  #typemenu button:hover { background: var(--bg-hl); }
+  #typemenu button.danger { color: #f7768e; }
+  [hidden] { display: none !important; }
+  #help { position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; }
+  #help-card { position: relative; width: min(640px, calc(100% - 40px)); max-height: calc(100% - 40px); overflow-y: auto; background: var(--bg-dark);
+               border: 1px solid var(--line); border-radius: 12px; padding: 18px 24px 22px; box-shadow: 0 8px 30px rgba(0,0,0,.7); }
+  #help-card h2 { margin: 0 0 12px; font-size: 20px; }
+  #help-close { position: absolute; right: 12px; top: 12px; font-size: 26px; width: 34px; height: 34px; }
+  #help-card dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 9px 18px; }
+  #help-card dt { font-weight: 700; color: #7aa2f7; }
+  #help-card dd { margin: 0; color: var(--fg-dim); }
+
+  /* Leads panel: a bubble with the open count, expands to a floating card. */
+  #panel { position: absolute; right: 12px; top: 10px; z-index: 7; width: 340px; max-height: calc(100% - 90px); display: flex; flex-direction: column;
+           background: var(--bg-dark); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.6); }
+  #panel.collapsed { width: auto; border-radius: 22px; }
+  #panel.collapsed #panel-body { display: none; }
+  #panel-toggle { border: 0; background: none; display: flex; align-items: center; gap: 8px; padding: 8px 14px; font-weight: 600; text-align: left; }
+  #panel-toggle .count { background: #f7768e; color: var(--bg); border-radius: 12px; padding: 0 9px; font-weight: 700; }
+  #panel-toggle .chev { margin-left: auto; color: var(--muted); font-size: 20px; }
+  #panel-body { overflow-y: auto; padding: 0 12px 12px; }
+  #panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; margin: 12px 0 6px; color: var(--muted); }
+  #panel h2:first-child { margin-top: 4px; }
+  .pitem { display: flex; gap: 8px; align-items: flex-start; padding: 7px 4px; border-bottom: 1px solid var(--bg-hl); }
+  .pitem input { margin-top: 3px; }
+  .pmain { flex: 1; cursor: pointer; }
+  .pitem:hover { background: var(--bg-hl); }
+  .pitem.done .ptext { text-decoration: line-through; color: var(--muted); }
+  .where { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px; }
+  .where a { font-size: 13px; border: 1px solid var(--c); color: var(--c); border-radius: 9px; padding: 0 7px; cursor: pointer; }
+  .where a:hover { background: var(--c); color: var(--bg); }
+  .empty { color: var(--muted); font-size: 14px; }
+
+  #board-name { font: inherit; font-weight: 600; width: 220px; padding: 5px 10px; border-radius: 6px; border: 1px solid transparent;
+                background: none; color: var(--fg); outline: none; }
+  #board-name:hover, #board-name:focus { border-color: var(--line); background: var(--bg-dark); }
+  #status { color: #f7768e; font-size: 14px; font-weight: 600; }
+  #typemenu hr { border: 0; border-top: 1px solid var(--line); margin: 3px 0; width: 100%; }
+  #typemenu button.current { font-weight: 700; color: #7aa2f7; }
+  #empty-hint { position: absolute; left: 50%; top: 45%; transform: translate(-50%, -50%); text-align: center; color: var(--muted);
+                font-size: 18px; line-height: 1.7; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="canvas">
+    <div id="world">
+      <svg id="edges"><defs><marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="12" viewBox="0 0 14 12" refX="10" refY="6" orient="auto"><path d="M0,0 L14,6 L0,12 z"/></marker></defs><g id="g-edges"></g></svg>
+      <svg id="overlay"><line id="temp" /></svg>
+    </div>
+    <div id="toolbar">
+      <button id="boards-btn" title="Plansze, eksport, import">Plansze ▾</button>
+      <input id="board-name" placeholder="Nazwa planszy" title="Nazwa planszy" spellcheck="false">
+      <button id="zoom-reset" title="Skala 100%">100%</button>
+      <button id="fit">Dopasuj</button>
+      <button id="help-btn" title="Instrukcja">?</button>
+      <span id="status" hidden></span>
+      <input id="import-file" type="file" accept=".json,application/json" hidden>
+    </div>
+    <div id="empty-hint" hidden>Pusta plansza.<br>Prawy klik w dowolnym miejscu dodaje pierwszy materiał.<br>Instrukcja jest pod przyciskiem „?".</div>
+    <div id="typemenu" hidden></div>
+  </div>
+  <aside id="panel" class="collapsed">
+    <button id="panel-toggle" title="Zwiń / rozwiń listę tropów"></button>
+    <div id="panel-body"></div>
+  </aside>
+</div>
+<div id="help" hidden>
+  <div id="help-card">
+    <button class="icon" id="help-close" title="Zamknij">×</button>
+    <h2>Jak tego używać</h2>
+    <dl>
+      <dt>Nowy materiał</dt><dd>Prawy klik na pustym miejscu planszy, potem wybór typu: osoba, sprawa, miejsce albo dowód.</dd>
+      <dt>Nazwa</dt><dd>Dwuklik na nazwie. Enter kończy edycję.</dd>
+      <dt>Przesuwanie</dt><dd>Materiał przeciągasz za nagłówek. Planszę przeciągasz za tło albo środkowym przyciskiem myszy z dowolnego miejsca.</dd>
+      <dt>Powiązanie</dt><dd>Przeciągnij kropkę przy nagłówku na inny materiał albo przytrzymaj Shift i przeciągnij z dowolnego miejsca materiału. Upuszczenie na pustym miejscu tworzy nowy, od razu połączony materiał.</dd>
+      <dt>Opis powiązania</dt><dd>Klik na etykiecie włącza edycję, przeciągnięcie przesuwa ją wzdłuż linii. Opis mówi, kim jest początek strzałki dla jej końca. Po najechaniu: odwróć, bez strzałki, hipoteza, usuń.</dd>
+      <dt>Notatka</dt><dd>Przycisk „+ notatka" na materiale albo, dla luźnej notatki, prawy klik na pustym miejscu i „Notatka". Klik na karteczce włącza edycję, przeciągnięcie ją przesuwa. Enter kończy, Shift + Enter robi nową linię. Pusta notatka znika.</dd>
+      <dt>Trop</dt><dd>Przycisk „+ trop": numer karty i zdanie opisu. Pole wyboru oznacza trop jako sprawdzony. Ten sam numer przy kilku materiałach to jeden trop.</dd>
+      <dt>Lista tropów</dt><dd>Bąbelek „Tropy" w prawym górnym rogu. Klik na pozycji pokazuje materiał na planszy.</dd>
+      <dt>Grupa</dt><dd>Prawy klik na pustym miejscu i „Grupa": ramka na materiały jednej sprawy. Przeciągnięcie za nagłówek przesuwa ją razem z zawartością, rogi zmieniają rozmiar. Prawy klik na nagłówku usuwa samą ramkę.</dd>
+      <dt>Widok</dt><dd>Kółko myszy przybliża i oddala. Klik środkowym przyciskiem myszy: przy innym powiększeniu wraca do 100% i centruje widok na klikniętym miejscu, przy 100% dopasowuje widok do całej planszy.</dd>
+      <dt>Zwijanie</dt><dd>Przycisk ▾ w nagłówku materiału.</dd>
+      <dt>Usuwanie</dt><dd>Materiał: prawy klik na nim. Notatka: × po najechaniu albo wyczyszczenie tekstu. Powiązanie: „usuń" pod opisem.</dd>
+      <dt>Plansze</dt><dd>Przycisk „Plansze": osobna plansza na każdą sprawę, eksport do pliku i import z pliku. Zmiany zapisują się same w tej przeglądarce.</dd>
+    </dl>
+  </div>
+</div>
+
+<script>
+const TYPES = {
+  osoba:   { label: 'Osoba',   placeholder: 'Imię i nazwisko' },
+  sprawa:  { label: 'Sprawa',  placeholder: 'Nazwa sprawy' },
+  miejsce: { label: 'Miejsce', placeholder: 'Nazwa miejsca' },
+  dowod:   { label: 'Dowód',   placeholder: 'Nazwa dowodu' },
+};
+const ICONS = {
+  osoba:   '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/>',
+  sprawa:  '<path d="M3 6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  miejsce: '<path d="M12 22s7-6.2 7-12a7 7 0 1 0-14 0c0 5.8 7 12 7 12z"/><circle cx="12" cy="10" r="2.5"/>',
+  dowod:   '<circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/>',
+  notatka: '<path d="M5 3h14a2 2 0 0 1 2 2v9l-7 7H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M14 21v-5a2 2 0 0 1 2-2h5"/>',
+  grupa:   '<rect x="3" y="4" width="18" height="16" rx="2" stroke-dasharray="4 3"/>',
+};
+function typeIcon(type) {
+  const el = document.createElement('span');
+  el.className = 'ticon';
+  el.innerHTML = `<svg viewBox="0 0 24 24">${ICONS[type]}</svg>`;
+  return el;
+}
+const uid = p => p + Math.random().toString(36).slice(2, 10);
+const note = text => ({ id: uid('t'), text, pos: null });
+
+/* ---------- storage ----------
+   store = { current: boardId, boards: [board] }
+   board = { id, name, nodes, edges, leads, notes, groups }
+   groups = [{ id, title, x, y, w, h, color }]   frames; what lies inside is decided by position, not stored
+   notes = [{ id, text, x, y }]   loose notes, not attached to any node
+   node  = { id, type, title, x, y, collapsed, notes: [{ id, text, pos }], leads: [cardNumber] }
+   edge  = { id, from, to, label, hypothesis, directed, t }
+           The label describes `from` in relation to `to`; a directed edge draws its arrow at `to`.
+   leads = { cardNumber: { comment, done } }
+           A lead is identified by its card number: one status and one comment, however many nodes it hangs on. */
+
+const STORE_KEY = 'detektyw-notatnik.v1';
+const emptyBoard = name => ({ id: uid('b'), name, nodes: [], edges: [], leads: {}, notes: [], groups: [] });
+
+function validBoard(b) {
+  return !!b && Array.isArray(b.nodes) && Array.isArray(b.edges) && !!b.leads && typeof b.leads === 'object' &&
+    (b.notes === undefined || Array.isArray(b.notes)) && (b.groups === undefined || Array.isArray(b.groups)) &&
+    b.nodes.every(n => TYPES[n.type] && Array.isArray(n.notes) && Array.isArray(n.leads) && n.leads.every(num => b.leads[num])) &&
+    b.edges.every(e => b.nodes.some(n => n.id === e.from) && b.nodes.some(n => n.id === e.to));
+}
+
+let savedJson = null;
+function loadStore() {
+  let raw = null;
+  try { raw = localStorage.getItem(STORE_KEY); } catch (_) {}
+  if (raw) {
+    try {
+      const s = JSON.parse(raw);
+      if (Array.isArray(s.boards) && s.boards.length && s.boards.every(validBoard)) { savedJson = raw; return s; }
+    } catch (_) {}
+    // Unreadable data would be overwritten by the first autosave: keep a copy aside.
+    try { localStorage.setItem(STORE_KEY + '.broken', raw); } catch (_) {}
+  }
+  const b = emptyBoard('Sprawa 1');
+  return { current: b.id, boards: [b] };
+}
+
+let store = loadStore();
+let state = store.boards.find(b => b.id === store.current) || store.boards[0];
+state.notes ??= []; state.groups ??= [];
+const view = { x: 0, y: 0, k: 1 };
+
+const $ = s => document.querySelector(s);
+const canvas = $('#canvas'), world = $('#world'), gEdges = $('#g-edges'), temp = $('#temp'),
+      panel = $('#panel'), panelBody = $('#panel-body'), panelToggle = $('#panel-toggle'), typemenu = $('#typemenu'),
+      statusEl = $('#status'), boardName = $('#board-name');
+const nodeEls = new Map(), stickyEls = new Map(), labelEls = new Map(), looseEls = new Map(), groupEls = new Map();
+let rendering = false, panelSig = null, drag = null;
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === 'class') el.className = v;
+    else if (k === 'text') el.textContent = v;
+    else if (k === 'dataset') Object.assign(el.dataset, v);
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid);
+  return el;
+}
+const textOf = el => el.innerText.replace(/\u00a0/g, ' ').trim();
+const byId = id => state.nodes.find(n => n.id === id);
+const isEditing = () => { const a = document.activeElement; return a && (a.isContentEditable || /^(INPUT|TEXTAREA)$/.test(a.tagName)); };
+
+// Blur handlers must not rebuild the DOM: a blur fires on mousedown, and replacing
+// the element under the cursor would swallow the click that caused it.
+function editable(el, { commit, onDemand }) {
+  if (onDemand) el.dataset.onDemand = '1'; else el.setAttribute('contenteditable', 'plaintext-only');
+  el.spellcheck = false;
+  el.addEventListener('keydown', e => {
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); el.blur(); }
+    else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); el.blur(); }
+  });
+  el.addEventListener('blur', () => {
+    if (onDemand) el.removeAttribute('contenteditable');
+    if (rendering || !el.isConnected) return;
+    const t = textOf(el);
+    if (!t) el.textContent = '';
+    commit(t);
+  });
+}
+function focusEnd(el) {
+  if (el.dataset.onDemand) el.setAttribute('contenteditable', 'plaintext-only');
+  el.focus();
+  const r = document.createRange(); r.selectNodeContents(el); r.collapse(false);
+  const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+}
+// Start editing with the caret where the user clicked.
+function editAt(el, x, y) {
+  focusEnd(el);
+  let r = null;
+  if (document.caretPositionFromPoint) {
+    const p = document.caretPositionFromPoint(x, y);
+    if (p && el.contains(p.offsetNode)) { r = document.createRange(); r.setStart(p.offsetNode, p.offset); }
+  } else if (document.caretRangeFromPoint) {
+    r = document.caretRangeFromPoint(x, y);
+    if (r && !el.contains(r.startContainer)) r = null;
+  }
+  if (r) { r.collapse(true); const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
+}
+
+/* ---------- rendering ---------- */
+
+function render(focusSel) {
+  rendering = true;
+  world.querySelectorAll('.group, .node, .sticky, .edge-label').forEach(e => e.remove());
+  nodeEls.clear(); stickyEls.clear(); labelEls.clear(); looseEls.clear(); groupEls.clear();
+  for (const n of state.nodes) world.append(nodeEl(n));
+  for (const n of state.nodes) if (!n.collapsed) for (const t of n.notes) world.append(stickyEl(n, t));
+  for (const g of state.groups) world.append(groupEl(g));
+  for (const t of state.notes) world.append(looseNoteEl(t));
+  for (const e of state.edges) world.append(edgeLabelEl(e));
+  rendering = false;
+  applyView();
+  refreshDerived();
+  if (focusSel) { const el = world.querySelector(focusSel); if (el) focusEnd(el); }
+}
+
+function refreshDerived() {
+  layoutStickies(); updateEdges(); renderPanel();
+  $('#empty-hint').hidden = state.nodes.length + state.notes.length + state.groups.length > 0;
+}
+
+function nodeEl(n) {
+  const T = TYPES[n.type];
+  const title = h('div', { class: 'title', 'data-ph': T.placeholder, title: 'Dwuklik: edycja nazwy', text: n.title });
+  title.addEventListener('dblclick', e => { e.stopPropagation(); editTitle(title); });
+  title.addEventListener('keydown', e => {
+    e.stopPropagation();
+    if (e.key !== 'Enter' && e.key !== 'Escape') return;
+    e.preventDefault();
+    const edgeId = e.key === 'Enter' && title.dataset.thenEdge;
+    title.blur();
+    const label = edgeId && world.querySelector(`.edge-label[data-edge-id="${edgeId}"] .text`);
+    if (label) focusEnd(label);
+  });
+  title.addEventListener('blur', () => {
+    title.removeAttribute('contenteditable');
+    delete title.dataset.thenEdge;
+    if (rendering || !title.isConnected) return;
+    n.title = textOf(title); title.textContent = n.title;
+    refreshDerived();
+  });
+
+  const open = n.leads.filter(num => !state.leads[num].done).length;
+  const head = h('div', { class: 'head' },
+    h('div', { class: 'row' },
+      h('span', { class: 'type', text: T.label }),
+      h('button', { class: 'icon', title: n.collapsed ? 'Rozwiń' : 'Zwiń', text: n.collapsed ? '▸' : '▾',
+                    onclick: () => { n.collapsed = !n.collapsed; render(); } })),
+    h('div', { class: 'trow' }, typeIcon(n.type), title),
+    n.collapsed && h('div', { class: 'summary', text: `notatki: ${n.notes.length} · otwarte tropy: ${open} z ${n.leads.length}` }),
+    h('div', { class: 'handle', title: 'Przeciągnij na inny materiał, żeby połączyć', onmousedown: e => startConnect(e, n) }));
+  head.addEventListener('mousedown', e => startNodeDrag(e, n));
+
+  const el = h('div', { class: `node ${n.type}${n.collapsed ? ' collapsed' : ''}`, dataset: { id: n.id }, style: `left:${n.x}px;top:${n.y}px` }, head);
+  el.addEventListener('contextmenu', e => {
+    if (e.target.isContentEditable || e.target.closest('input')) return;  // keep the native menu while typing
+    e.preventDefault();
+    showMenu(e.clientX, e.clientY, [{ label: 'Usuń materiał', cls: 'danger', pick: () => deleteNode(n) }]);
+  });
+  // Shift + drag from anywhere on the node starts a connection instead of moving or editing.
+  el.addEventListener('mousedown', e => { if (e.shiftKey && !e.target.closest('button, input')) startConnect(e, n); }, true);
+  if (!n.collapsed) {
+    const leads = h('div', { class: 'leads' }, n.leads.map(num => leadEl(n, num)));
+    el.append(h('div', { class: 'body' },
+      leads,
+      h('div', { class: 'actions' },
+        h('button', { text: '+ notatka', onclick: () => addNote(n) }),
+        h('button', { text: '+ trop', onclick: () => openLeadForm(n, leads) }))));
+  }
+  nodeEls.set(n.id, el);
+  return el;
+}
+
+function editTitle(title) {
+  title.setAttribute('contenteditable', 'plaintext-only');
+  title.focus();
+  getSelection().selectAllChildren(title);
+}
+
+/* ---------- notes ---------- */
+
+function addNote(n) {
+  const t = note('');
+  n.notes.push(t);
+  n.collapsed = false;
+  render(`[data-note-id="${t.id}"]`);
+}
+function removeNote(n, t) {
+  n.notes.splice(n.notes.indexOf(t), 1);
+  render();
+}
+function commitNote(n, t, text, wrapper) {
+  if (!n.notes.includes(t)) return;
+  if (text) t.text = text;
+  else { n.notes.splice(n.notes.indexOf(t), 1); stickyEls.delete(t.id); wrapper.remove(); }
+  refreshDerived();
+}
+
+// A free-standing sticky note. Stacks under its node until dragged, then keeps its own offset.
+// The whole surface drags; a click without movement starts editing.
+function stickyEl(n, t) {
+  const txt = h('div', { class: 'text', 'data-ph': 'notatka…', dataset: { noteId: t.id }, text: t.text });
+  const el = h('div', { class: `sticky ${n.type}`, dataset: { nodeId: n.id } }, txt,
+    h('button', { class: 'icon del', text: '×', title: 'Usuń notatkę', onmousedown: e => e.stopPropagation(), onclick: () => removeNote(n, t) }));
+  el.addEventListener('mousedown', e => startStickyDrag(e, n, t));
+  editable(txt, { onDemand: true, commit: text => commitNote(n, t, text, el) });
+  stickyEls.set(t.id, { el, n, t, x: 0, y: 0 });
+  return el;
+}
+
+// A loose note lives on the board on its own: same handling as a sticky note, but with its own position.
+function addLooseNote(x, y) {
+  const t = { id: uid('t'), text: '', x, y };
+  state.notes.push(t);
+  render(`[data-note-id="${t.id}"]`);
+}
+function looseNoteEl(t) {
+  const txt = h('div', { class: 'text', 'data-ph': 'notatka…', dataset: { noteId: t.id }, text: t.text });
+  const drop = () => { state.notes = state.notes.filter(x => x !== t); };
+  const el = h('div', { class: 'sticky loose', style: `left:${t.x}px;top:${t.y}px` }, txt,
+    h('button', { class: 'icon del', text: '×', title: 'Usuń notatkę', onmousedown: e => e.stopPropagation(), onclick: () => { drop(); render(); } }));
+  el.addEventListener('mousedown', e => {
+    if (e.button !== 0 || txt.isContentEditable) return;
+    const sx = e.clientX, sy = e.clientY, ox = t.x, oy = t.y;
+    let moved = false;
+    beginDrag(e, {
+      move: ev => {
+        if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 4) return;
+        moved = true;
+        t.x = ox + (ev.clientX - sx) / view.k; t.y = oy + (ev.clientY - sy) / view.k;
+        el.style.left = t.x + 'px'; el.style.top = t.y + 'px';
+      },
+      up: ev => { if (!moved && txt.isConnected) editAt(txt, ev.clientX, ev.clientY); },
+    });
+  });
+  editable(txt, { onDemand: true, commit: text => {
+    if (!state.notes.includes(t)) return;
+    if (text) t.text = text; else { drop(); looseEls.delete(t.id); el.remove(); }
+    refreshDerived();
+  } });
+  looseEls.set(t.id, el);
+  return el;
+}
+
+/* ---------- groups ---------- */
+
+function addGroup(x, y) {
+  const g = { id: uid('g'), title: '', x, y, w: 640, h: 420, color: state.groups.length % 4 };
+  state.groups.push(g);
+  render();
+  editTitle(groupEls.get(g.id).querySelector('.gtitle'));
+}
+
+function groupEl(g) {
+  const title = h('div', { class: 'gtitle', 'data-ph': 'Nazwa grupy', title: 'Dwuklik: edycja nazwy', text: g.title });
+  title.addEventListener('dblclick', e => { e.stopPropagation(); editTitle(title); });
+  title.addEventListener('keydown', e => {
+    e.stopPropagation();
+    if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); title.blur(); }
+  });
+  title.addEventListener('blur', () => {
+    title.removeAttribute('contenteditable');
+    if (rendering || !title.isConnected) return;
+    g.title = textOf(title); title.textContent = g.title;
+  });
+  const bar = h('div', { class: 'gbar', title: 'Przeciągnij, żeby przesunąć grupę razem z zawartością' }, typeIcon('grupa'), title);
+  bar.addEventListener('mousedown', e => startGroupDrag(e, g));
+  bar.addEventListener('contextmenu', e => {
+    if (e.target.isContentEditable) return;
+    e.preventDefault();
+    showMenu(e.clientX, e.clientY, [{ label: 'Usuń grupę (zawartość zostaje)', cls: 'danger',
+      pick: () => { state.groups = state.groups.filter(x => x !== g); render(); } }]);
+  });
+  const el = h('div', { class: `group g${g.color}`, dataset: { groupId: g.id },
+                        style: `left:${g.x}px;top:${g.y}px;width:${g.w}px;height:${g.h}px` }, bar,
+    ['nw', 'ne', 'sw', 'se'].map(c => h('div', { class: 'gresize ' + c, onmousedown: e => startGroupResize(e, g, c) })));
+  groupEls.set(g.id, el);
+  return el;
+}
+
+// Dragging a group carries along the cards and loose notes whose centre is inside it at that moment.
+function startGroupDrag(e, g) {
+  if (e.button !== 0 || e.target.isContentEditable) return;
+  const inside = (x, y) => x >= g.x && x <= g.x + g.w && y >= g.y && y <= g.y + g.h;
+  const nodes = state.nodes.filter(n => { const b = box(n); return inside(b.x, b.y); }).map(n => ({ n, x: n.x, y: n.y }));
+  const notes = state.notes.filter(t => { const el = looseEls.get(t.id); return inside(t.x + el.offsetWidth / 2, t.y + el.offsetHeight / 2); })
+    .map(t => ({ t, x: t.x, y: t.y }));
+  const sx = e.clientX, sy = e.clientY, ox = g.x, oy = g.y, el = groupEls.get(g.id);
+  const place = (node, x, y) => { node.style.left = x + 'px'; node.style.top = y + 'px'; };
+  beginDrag(e, { move: ev => {
+    const dx = (ev.clientX - sx) / view.k, dy = (ev.clientY - sy) / view.k;
+    g.x = ox + dx; g.y = oy + dy; place(el, g.x, g.y);
+    for (const { n, x, y } of nodes) { n.x = x + dx; n.y = y + dy; place(nodeEls.get(n.id), n.x, n.y); }
+    for (const { t, x, y } of notes) { t.x = x + dx; t.y = y + dy; place(looseEls.get(t.id), t.x, t.y); }
+    layoutStickies(); updateEdges();
+  } });
+}
+
+// Corners resize the frame only; nothing inside moves.
+function startGroupResize(e, g, corner) {
+  if (e.button !== 0) return;
+  e.stopPropagation();
+  const sx = e.clientX, sy = e.clientY, o = { ...g }, el = groupEls.get(g.id);
+  beginDrag(e, { move: ev => {
+    const dx = (ev.clientX - sx) / view.k, dy = (ev.clientY - sy) / view.k;
+    g.w = Math.max(240, corner.includes('e') ? o.w + dx : o.w - dx);
+    g.h = Math.max(140, corner.includes('s') ? o.h + dy : o.h - dy);
+    g.x = corner.includes('w') ? o.x + o.w - g.w : o.x;
+    g.y = corner.includes('n') ? o.y + o.h - g.h : o.y;
+    el.style.cssText = `left:${g.x}px;top:${g.y}px;width:${g.w}px;height:${g.h}px`;
+  } });
+}
+
+function layoutStickies() {
+  for (const n of state.nodes) {
+    const nel = nodeEls.get(n.id);
+    if (!nel || n.collapsed) continue;
+    let stackY = nel.offsetHeight + 22;  // leaves room for an arrowhead entering from below
+    for (const t of n.notes) {
+      const s = stickyEls.get(t.id);
+      if (!s) continue;
+      if (t.pos) { s.x = n.x + t.pos.dx; s.y = n.y + t.pos.dy; }
+      else { s.x = n.x + 24; s.y = n.y + stackY; stackY += s.el.offsetHeight + 8; }
+      s.el.style.left = s.x + 'px'; s.el.style.top = s.y + 'px';
+    }
+  }
+}
+
+/* ---------- leads ---------- */
+
+function leadEl(n, num) {
+  const l = state.leads[num];
+  const comment = h('span', { class: 'comment', 'data-ph': 'o czym jest…', text: l.comment });
+  editable(comment, { commit: text => { if (!state.leads[num]) return; state.leads[num].comment = text; syncLead(num); refreshDerived(); } });
+  const box = h('input', { type: 'checkbox', title: 'Trop sprawdzony', onchange: e => toggleLead(num, e.target.checked) });
+  box.checked = l.done;
+  return h('div', { class: 'lead' + (l.done ? ' done' : ''), dataset: { lead: num } },
+    box, h('span', { class: 'num', text: '#' + num }), comment,
+    h('button', { class: 'icon', text: '×', title: 'Odepnij trop od tego materiału', onclick: () => { detachLead(n, num); render(); } }));
+}
+
+function toggleLead(num, done) { state.leads[num].done = done; syncLead(num); refreshDerived(); }
+
+// The same lead can be shown on several nodes; keep every copy in step.
+function syncLead(num) {
+  const l = state.leads[num];
+  world.querySelectorAll(`.lead[data-lead="${CSS.escape(num)}"]`).forEach(row => {
+    row.classList.toggle('done', l.done);
+    row.querySelector('input').checked = l.done;
+    const c = row.querySelector('.comment');
+    if (c !== document.activeElement) c.textContent = l.comment;
+  });
+}
+
+function detachLead(n, num) {
+  n.leads = n.leads.filter(x => x !== num);
+  if (!state.nodes.some(m => m.leads.includes(num))) delete state.leads[num];
+}
+
+function openLeadForm(n, leads) {
+  if (leads.querySelector('.lead-form')) return;
+  const fNum = h('input', { class: 'f-num', placeholder: 'nr karty' });
+  const fComment = h('input', { class: 'f-comment', placeholder: 'o czym jest' });
+  const form = h('div', { class: 'lead-form' }, '#', fNum, fComment);
+  let closed = false;
+  const close = save => {
+    if (closed) return; closed = true;
+    const num = fNum.value.trim().replace(/^#/, ''), comment = fComment.value.trim();
+    form.remove();
+    if (save && num) {
+      state.leads[num] ??= { comment: '', done: false };
+      if (comment) state.leads[num].comment = comment;
+      if (!n.leads.includes(num)) { n.leads.push(num); leads.append(leadEl(n, num)); }
+      syncLead(num);
+    }
+    refreshDerived();
+  };
+  form.addEventListener('keydown', e => {
+    e.stopPropagation();
+    if (e.key === 'Escape') close(false);
+    else if (e.key === 'Enter') { if (e.target === fNum && fNum.value.trim()) fComment.focus(); else close(true); }
+  });
+  form.addEventListener('focusout', e => { if (!rendering && !form.contains(e.relatedTarget)) close(true); });
+  leads.append(form);
+  updateEdges();
+  fNum.focus();
+}
+
+/* ---------- edges ---------- */
+
+function edgeLabelEl(e) {
+  const txt = h('span', { class: 'text', 'data-ph': 'opis…', text: e.label });
+  editable(txt, { onDemand: true, commit: text => { e.label = text; } });
+  // Buttons rebuild the label; keep them shown on the new element until the pointer leaves it.
+  const act = change => () => { change(); render(); labelEls.get(e.id).classList.add('keep'); };
+  const el = h('div', { class: 'edge-label' + (e.hypothesis ? ' hyp' : ''), dataset: { edgeId: e.id } }, txt,
+    h('span', { class: 'ctl' },
+      e.directed && h('button', { 'data-act': 'reverse', text: 'odwróć', title: 'Odwróć kierunek strzałki', onclick: act(() => { [e.from, e.to] = [e.to, e.from]; if (e.t != null) e.t = 1 - e.t; }) }),
+      h('button', { 'data-act': 'directed', text: e.directed ? 'bez strzałki' : 'ze strzałką', title: 'Powiązanie kierunkowe albo symetryczne', onclick: act(() => { e.directed = !e.directed; }) }),
+      h('button', { 'data-act': 'hyp', text: e.hypothesis ? 'to fakt' : 'to hipoteza', onclick: act(() => { e.hypothesis = !e.hypothesis; }) }),
+      h('button', { 'data-act': 'del', text: 'usuń', onclick: () => { state.edges = state.edges.filter(x => x !== e); render(); } })));
+  el.addEventListener('mousedown', ev => startLabelDrag(ev, e, txt));
+  el.addEventListener('mouseleave', () => el.classList.remove('keep'));
+  labelEls.set(e.id, el);
+  return el;
+}
+
+// Visible part of an edge: from the border of one card to the border of the other.
+function edgeSegment(e) {
+  const a = box(byId(e.from)), b = box(byId(e.to));
+  return [exitPoint(a, b), exitPoint(b, a)];
+}
+
+// The label slides along its edge; e.t is its position between the two ends (default: the middle).
+function startLabelDrag(ev, e, txt) {
+  if (ev.button !== 0 || ev.target.closest('button') || txt.isContentEditable) return;
+  const sx = ev.clientX, sy = ev.clientY;
+  let moved = false;
+  beginDrag(ev, {
+    move: m => {
+      if (!moved && Math.hypot(m.clientX - sx, m.clientY - sy) < 4) return;
+      moved = true;
+      const [p, q] = edgeSegment(e), c = toWorld(m), dx = q.x - p.x, dy = q.y - p.y;
+      const t = ((c.x - p.x) * dx + (c.y - p.y) * dy) / (dx * dx + dy * dy || 1);
+      e.t = Math.min(0.92, Math.max(0.08, t));
+      updateEdges();
+    },
+    up: m => { if (!moved && txt.isConnected) editAt(txt, m.clientX, m.clientY); },
+  });
+}
+
+function box(n) {
+  const el = nodeEls.get(n.id);
+  const w = el.offsetWidth / 2, hh = el.offsetHeight / 2;
+  return { x: n.x + w, y: n.y + hh, w, h: hh };
+}
+// Point where the segment from the centre of box a towards p leaves the box.
+function exitPoint(a, p) {
+  const dx = p.x - a.x, dy = p.y - a.y;
+  const t = Math.min(dx ? a.w / Math.abs(dx) : Infinity, dy ? a.h / Math.abs(dy) : Infinity, 1);
+  return { x: a.x + dx * t, y: a.y + dy * t };
+}
+
+function updateEdges() {
+  let out = '';
+  for (const s of stickyEls.values()) {
+    if (!s.el.isConnected || !nodeEls.has(s.n.id)) continue;
+    const a = box(s.n);
+    out += `<line class="tether ${s.n.type}" x1="${a.x}" y1="${a.y}" x2="${s.x + s.el.offsetWidth / 2}" y2="${s.y + s.el.offsetHeight / 2}"/>`;
+  }
+  for (const e of state.edges) {
+    const from = byId(e.from), to = byId(e.to);
+    if (!from || !to || !nodeEls.has(from.id) || !nodeEls.has(to.id)) continue;
+    const [p, q] = edgeSegment(e), lab = labelEls.get(e.id), t = e.t ?? 0.5;
+    // Lines run border to border so the arrowhead is not hidden under the target card.
+    const len = Math.hypot(q.x - p.x, q.y - p.y) || 1, back = e.directed ? 4 : 0;
+    const ex = q.x - (q.x - p.x) / len * back, ey = q.y - (q.y - p.y) / len * back;
+    out += `<line class="edge${e.hypothesis ? ' hyp' : ''}" x1="${p.x}" y1="${p.y}" x2="${ex}" y2="${ey}"${e.directed ? ' marker-end="url(#arrow)"' : ''}/>`;
+    if (lab) { lab.style.left = p.x + (q.x - p.x) * t + 'px'; lab.style.top = p.y + (q.y - p.y) * t + 'px'; }
+  }
+  gEdges.innerHTML = out;
+}
+
+/* ---------- side panel: leads ---------- */
+
+function renderPanel() {
+  const all = Object.entries(state.leads)
+    .map(([num, l]) => ({ num, ...l, nodes: state.nodes.filter(n => n.leads.includes(num)) }))
+    .sort((a, b) => a.num.localeCompare(b.num, undefined, { numeric: true }));
+  const sig = JSON.stringify(all.map(l => [l.num, l.comment, l.done, l.nodes.map(n => [n.id, n.title])]));
+  if (sig === panelSig) return;
+  panelSig = sig;
+
+  const item = l => {
+    const cb = h('input', { type: 'checkbox', title: 'Trop sprawdzony', onchange: e => toggleLead(l.num, e.target.checked) });
+    cb.checked = l.done;
+    return h('div', { class: 'pitem' + (l.done ? ' done' : ''), dataset: { lead: l.num } }, cb,
+      h('div', { class: 'pmain', title: 'Pokaż na planszy', onclick: () => l.nodes[0] && focusNode(l.nodes[0].id) },
+        h('div', { class: 'ptext' }, h('b', { text: '#' + l.num }), ' ', l.comment || h('i', { class: 'empty', text: 'bez opisu' })),
+        h('div', { class: 'where' }, l.nodes.map(n =>
+          h('a', { class: n.type, text: n.title || '(bez nazwy)', onclick: e => { e.stopPropagation(); focusNode(n.id); } })))));
+  };
+  const open = all.filter(l => !l.done), done = all.filter(l => l.done);
+  panelToggle.replaceChildren('Tropy', h('span', { class: 'count', title: 'Otwarte tropy', text: open.length }), h('span', { class: 'chev', text: '▾' }));
+  panelBody.replaceChildren(
+    h('h2', { text: `Otwarte (${open.length})` }),
+    open.length ? h('div', {}, open.map(item)) : h('div', { class: 'empty', text: 'Brak otwartych tropów.' }),
+    h('h2', { text: `Sprawdzone (${done.length})` }),
+    h('div', {}, done.map(item)));
+}
+
+/* ---------- nodes: add / delete / drag / connect ---------- */
+
+function addNode(type, x, y, linkFrom) {
+  const n = { id: uid('n'), type, title: '', x, y, collapsed: false, notes: [], leads: [] };
+  state.nodes.push(n);
+  const edge = linkFrom && { id: uid('e'), from: linkFrom.id, to: n.id, label: '', hypothesis: false, directed: true };
+  if (edge) state.edges.push(edge);
+  render();
+  const title = nodeEls.get(n.id).querySelector('.title');
+  if (edge) title.dataset.thenEdge = edge.id;
+  editTitle(title);
+}
+
+function deleteNode(n) {
+  for (const num of [...n.leads]) detachLead(n, num);
+  state.nodes = state.nodes.filter(x => x !== n);
+  state.edges = state.edges.filter(e => e.from !== n.id && e.to !== n.id);
+  render();
+}
+
+function beginDrag(e, handlers) {
+  if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+  e.preventDefault();
+  drag = handlers;
+}
+document.addEventListener('mousemove', e => { if (drag) drag.move(e); });
+document.addEventListener('mouseup', e => { if (drag) { const d = drag; drag = null; if (d.up) d.up(e); } });
+
+const toWorld = e => {
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left - view.x) / view.k, y: (e.clientY - r.top - view.y) / view.k };
+};
+
+function startNodeDrag(e, n) {
+  if (e.button !== 0 || e.target.closest('button, .handle') || e.target.isContentEditable) return;
+  const sx = e.clientX, sy = e.clientY, ox = n.x, oy = n.y, el = nodeEls.get(n.id);
+  beginDrag(e, { move: ev => {
+    n.x = ox + (ev.clientX - sx) / view.k; n.y = oy + (ev.clientY - sy) / view.k;
+    el.style.left = n.x + 'px'; el.style.top = n.y + 'px';
+    layoutStickies(); updateEdges();
+  } });
+}
+
+function startStickyDrag(e, n, t) {
+  const s = stickyEls.get(t.id), txt = s.el.querySelector('.text');
+  if (e.button !== 0 || txt.isContentEditable) return;
+  const sx = e.clientX, sy = e.clientY, ox = s.x - n.x, oy = s.y - n.y;
+  let moved = false;
+  beginDrag(e, {
+    move: ev => {
+      if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 4) return;
+      moved = true;
+      t.pos = { dx: ox + (ev.clientX - sx) / view.k, dy: oy + (ev.clientY - sy) / view.k };
+      layoutStickies(); updateEdges();
+    },
+    up: ev => { if (!moved && txt.isConnected) editAt(txt, ev.clientX, ev.clientY); },
+  });
+}
+
+function nodeIdAt(e) {
+  const el = document.elementFromPoint(e.clientX, e.clientY);
+  const hit = el && el.closest('.node, .sticky');
+  return hit ? (hit.dataset.id || hit.dataset.nodeId) : null;
+}
+
+function startConnect(e, n) {
+  if (e.button !== 0) return;
+  e.stopPropagation();
+  const a = box(n), src = nodeEls.get(n.id);
+  const mark = id => {
+    world.querySelectorAll('.node.target').forEach(x => x.classList.remove('target'));
+    if (id && id !== n.id) nodeEls.get(id).classList.add('target');
+  };
+  for (const [k, v] of [['x1', a.x], ['y1', a.y], ['x2', a.x], ['y2', a.y]]) temp.setAttribute(k, v);
+  canvas.classList.add('connecting'); src.classList.add('source');
+  beginDrag(e, {
+    move: ev => { const p = toWorld(ev); temp.setAttribute('x2', p.x); temp.setAttribute('y2', p.y); mark(nodeIdAt(ev)); },
+    up: ev => {
+      canvas.classList.remove('connecting'); mark(null);
+      const target = nodeIdAt(ev), under = document.elementFromPoint(ev.clientX, ev.clientY);
+      if (!target && under && isBackground(under)) {
+        // Keep the line and the source outline while the type menu is open.
+        const p = toWorld(ev);
+        canvas.classList.add('pending');
+        return showTypeMenu(ev.clientX, ev.clientY, type => addNode(type, p.x - 140, p.y - 24, n));
+      }
+      src.classList.remove('source');
+      if (!target || target === n.id) return;
+      const edge = { id: uid('e'), from: n.id, to: target, label: '', hypothesis: false, directed: true };
+      state.edges.push(edge);
+      render(`.edge-label[data-edge-id="${edge.id}"] .text`);
+    },
+  });
+}
+
+/* ---------- view: pan / zoom / focus ---------- */
+
+function applyView() {
+  world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.k})`;
+  canvas.style.backgroundSize = `${24 * view.k}px ${24 * view.k}px`;
+  canvas.style.backgroundPosition = `${view.x}px ${view.y}px`;
+  $('#zoom-reset').textContent = Math.round(view.k * 100) + '%';
+}
+function zoomAt(cx, cy, factor) {
+  const k = Math.min(2, Math.max(0.3, view.k * factor));
+  view.x = cx - (cx - view.x) * (k / view.k); view.y = cy - (cy - view.y) * (k / view.k); view.k = k;
+  applyView();
+}
+function animateView() { world.classList.add('anim'); setTimeout(() => world.classList.remove('anim'), 320); }
+
+function fitView() {
+  const boxes = [...nodeEls.entries()].map(([id, el]) => { const n = byId(id); return [n.x, n.y, n.x + el.offsetWidth, n.y + el.offsetHeight]; })
+    .concat([...stickyEls.values()].map(s => [s.x, s.y, s.x + s.el.offsetWidth, s.y + s.el.offsetHeight]))
+    .concat(state.groups.map(g => [g.x, g.y, g.x + g.w, g.y + g.h]))
+    .concat(state.notes.filter(t => looseEls.has(t.id)).map(t => { const el = looseEls.get(t.id); return [t.x, t.y, t.x + el.offsetWidth, t.y + el.offsetHeight]; }));
+  if (!boxes.length) { view.x = view.y = 0; view.k = 1; return applyView(); }
+  const x0 = Math.min(...boxes.map(b => b[0])), y0 = Math.min(...boxes.map(b => b[1])),
+        x1 = Math.max(...boxes.map(b => b[2])), y1 = Math.max(...boxes.map(b => b[3]));
+  const top = 70, bottom = 70, pad = 40, cw = canvas.clientWidth, ch = canvas.clientHeight;
+  view.k = Math.min(1, (cw - 2 * pad) / (x1 - x0), (ch - top - bottom) / (y1 - y0));
+  view.x = (cw - (x1 - x0) * view.k) / 2 - x0 * view.k;
+  view.y = top + (ch - top - bottom - (y1 - y0) * view.k) / 2 - y0 * view.k;
+  applyView();
+}
+
+function focusNode(id) {
+  const n = byId(id), el = nodeEls.get(id), a = box(n);
+  view.x = canvas.clientWidth / 2 - a.x * view.k; view.y = canvas.clientHeight / 2 - a.y * view.k;
+  animateView(); applyView();
+  el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+}
+
+const isBackground = t => t === canvas || t === world || !!t.closest('#edges, #overlay');
+
+canvas.addEventListener('mousedown', e => {
+  if (e.button !== 0 || !isBackground(e.target)) return;
+  const sx = e.clientX, sy = e.clientY, ox = view.x, oy = view.y;
+  canvas.classList.add('panning');
+  beginDrag(e, {
+    move: ev => { view.x = ox + ev.clientX - sx; view.y = oy + ev.clientY - sy; applyView(); },
+    up: () => canvas.classList.remove('panning'),
+  });
+});
+// Middle button, anywhere on the board (cards and notes included): drag pans.
+// A click without movement fits the whole board at 100%, otherwise goes to 100% centred on the clicked point.
+canvas.addEventListener('mousedown', e => {
+  if (e.button !== 1) return;
+  e.preventDefault(); e.stopPropagation();
+  const sx = e.clientX, sy = e.clientY, ox = view.x, oy = view.y;
+  let moved = false;
+  drag = {
+    move: ev => {
+      if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 4) return;
+      moved = true; canvas.classList.add('panning');
+      view.x = ox + ev.clientX - sx; view.y = oy + ev.clientY - sy; applyView();
+    },
+    up: ev => {
+      canvas.classList.remove('panning');
+      if (moved) return;
+      animateView();
+      if (Math.abs(view.k - 1) < 0.001) return fitView();
+      const p = toWorld(ev);
+      view.k = 1; view.x = canvas.clientWidth / 2 - p.x; view.y = canvas.clientHeight / 2 - p.y;
+      applyView();
+    },
+  };
+}, true);
+canvas.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  // Touchpad pinch arrives as ctrl+wheel with small deltas.
+  const r = canvas.getBoundingClientRect();
+  zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)));
+}, { passive: false });
+
+function showMenu(clientX, clientY, items) {
+  const r = canvas.getBoundingClientRect();
+  typemenu.replaceChildren(...items.map(it => it.sep ? h('hr') :
+    h('button', { class: it.cls, onclick: () => { closeTypeMenu(); it.pick(); } }, it.icon, it.label)));
+  typemenu.hidden = false;
+  typemenu.style.left = Math.min(clientX - r.left, r.width - typemenu.offsetWidth - 8) + 'px';
+  typemenu.style.top = Math.min(clientY - r.top, r.height - typemenu.offsetHeight - 8) + 'px';
+}
+function showTypeMenu(clientX, clientY, onPick, extra = []) {
+  showMenu(clientX, clientY, Object.entries(TYPES).map(([type, T]) =>
+    ({ label: T.label, cls: type, icon: typeIcon(type), pick: () => onPick(type) })).concat(extra));
+}
+function closeTypeMenu() {
+  typemenu.hidden = true;
+  canvas.classList.remove('pending');
+  world.querySelectorAll('.node.source').forEach(x => x.classList.remove('source'));
+}
+document.addEventListener('mousedown', e => { if (!typemenu.hidden && !typemenu.contains(e.target)) closeTypeMenu(); }, true);
+
+canvas.addEventListener('contextmenu', e => {
+  if (!isBackground(e.target)) return;
+  e.preventDefault();
+  const p = toWorld(e);
+  showTypeMenu(e.clientX, e.clientY, type => addNode(type, p.x, p.y),
+    [{ sep: true }, { label: 'Notatka', cls: 'loose', icon: typeIcon('notatka'), pick: () => addLooseNote(p.x, p.y) },
+     { label: 'Grupa', cls: 'g' + state.groups.length % 4, icon: typeIcon('grupa'), pick: () => addGroup(p.x, p.y) }]);
+});
+
+/* ---------- toolbar ---------- */
+
+panelToggle.onclick = () => panel.classList.toggle('collapsed');
+$('#zoom-reset').onclick = () => zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, 1 / view.k);
+$('#fit').onclick = () => { animateView(); fitView(); };
+
+const help = $('#help');
+$('#help-btn').onclick = () => { help.hidden = false; };
+$('#help-close').onclick = () => { help.hidden = true; };
+help.addEventListener('mousedown', e => { if (e.target === help) help.hidden = true; });
+
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (!help.hidden) help.hidden = true;
+  else if (!typemenu.hidden) closeTypeMenu();
+});
+
+/* ---------- boards ---------- */
+
+function showStatus(text, ms) {
+  statusEl.textContent = text; statusEl.hidden = !text;
+  if (ms) setTimeout(() => { if (statusEl.textContent === text) showStatus(''); }, ms);
+}
+
+function openBoard(b) {
+  if (isEditing()) document.activeElement.blur();
+  b.notes ??= []; b.groups ??= [];  // boards saved before loose notes and groups existed
+  state = b; store.current = b.id;
+  boardName.value = b.name;
+  document.title = (b.name || 'Plansza') + ' · Notatnik detektywa';
+  panelSig = null;
+  render(); fitView();
+}
+
+function newBoard() {
+  const b = emptyBoard(`Sprawa ${store.boards.length + 1}`);
+  store.boards.push(b);
+  openBoard(b);
+  boardName.focus(); boardName.select();
+}
+
+function deleteBoard() {
+  store.boards = store.boards.filter(b => b !== state);
+  if (!store.boards.length) store.boards.push(emptyBoard('Sprawa 1'));
+  openBoard(store.boards[0]);
+}
+
+const boardJson = () => JSON.stringify({ format: 'detektyw-notatnik', version: 1, board: state }, null, 2);
+
+function exportBoard() {
+  if (isEditing()) document.activeElement.blur();
+  const a = h('a', { href: URL.createObjectURL(new Blob([boardJson()], { type: 'application/json' })),
+                     download: (state.name.trim() || 'plansza').replace(/[\\/:*?"<>|]/g, '_') + '.json' });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function importBoard(text) {
+  let b = null;
+  try { const data = JSON.parse(text); b = data.board || data; } catch (_) {}
+  if (!validBoard(b)) return showStatus('Ten plik nie jest planszą notatnika.', 5000);
+  b.id = uid('b');  // an imported copy must not collide with the board it was exported from
+  b.name = String(b.name || 'Import');
+  store.boards.push(b);
+  openBoard(b);
+}
+$('#import-file').onchange = async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const text = await file.text();
+  e.target.value = '';
+  importBoard(text);
+};
+
+$('#boards-btn').onclick = () => {
+  const r = $('#boards-btn').getBoundingClientRect(), at = items => showMenu(r.left, r.bottom + 4, items);
+  at([
+    ...store.boards.map(b => ({ label: b.name || '(bez nazwy)', cls: b === state ? 'current' : '', pick: () => openBoard(b) })),
+    { sep: true },
+    { label: 'Nowa plansza', pick: newBoard },
+    { label: 'Eksport do pliku', pick: exportBoard },
+    { label: 'Import z pliku', pick: () => $('#import-file').click() },
+    { sep: true },
+    { label: 'Usuń tę planszę', cls: 'danger', pick: () => at([
+      { label: `Usuń „${state.name || '(bez nazwy)'}" na stałe`, cls: 'danger', pick: deleteBoard },
+      { label: 'Anuluj', pick: () => {} },
+    ]) },
+  ]);
+};
+
+boardName.addEventListener('input', () => { state.name = boardName.value; document.title = (state.name || 'Plansza') + ' · Notatnik detektywa'; });
+boardName.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === 'Escape') boardName.blur(); });
+
+/* ---------- autosave ----------
+   State changes in many places, so instead of hooking each one the store is compared
+   with its last saved form once a second and written when it differs. */
+
+const SAVE_FAILED = 'Zapis nie działa: zmiany znikną po zamknięciu strony. Zrób eksport do pliku.';
+function save() {
+  const json = JSON.stringify(store);
+  let ok = true;
+  if (json !== savedJson) {
+    try { localStorage.setItem(STORE_KEY, json); savedJson = json; } catch (_) { ok = false; }
+  }
+  if (!ok) showStatus(SAVE_FAILED);
+  else if (statusEl.textContent === SAVE_FAILED) showStatus('');
+}
+setInterval(save, 1000);
+document.addEventListener('visibilitychange', () => { if (document.hidden) save(); });
+addEventListener('pagehide', () => { if (isEditing()) document.activeElement.blur(); save(); });
+
+openBoard(state);
+</script>
+</body>
+</html>
